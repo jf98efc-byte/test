@@ -360,7 +360,7 @@
         </div>
         <div class="row" style="margin-top:10px;"><label for="styleSlug">Style name</label></div>
         <div class="splitrow">
-          <input type="text" id="styleSlug" list="styleGuesses" placeholder="standard" autocapitalize="off" spellcheck="false">
+          <input type="text" id="styleSlug" list="styleGuesses" placeholder="transparent" autocapitalize="off" spellcheck="false">
           <button id="probeBtn" style="flex:0 0 auto;">Find</button>
         </div>
         <datalist id="styleGuesses">
@@ -2432,7 +2432,7 @@ const S = {
   key: '',
   mode: 'style',         // 'style' = Phersu's own style endpoint (supported path)
   styleURL: 'https://data.phersu-atlas.com/api/style/{style}?key={key}&year={year}',
-  style: 'standard',
+  style: 'transparent',
   year: 1950,
   trial: true,           // trial keys serve a limited set of years
   trialYear: 1950,       // Phersu's own docs example uses 1950
@@ -3002,7 +3002,7 @@ async function connectStyleEndpoint(){
   };
 
   try {
-    let { slug, res } = await attempt(S.style || 'standard');
+    let { slug, res } = await attempt(S.style || 'transparent');
 
     // Self-heal a wrong slug (404): find one that works on the free tile
     // endpoint and retry, rather than making the user guess which of the four.
@@ -3118,7 +3118,7 @@ function nearestYear(years, target){
 
 /* Free: the tile endpoint is not billed, so slug discovery costs nothing. */
 async function findValidSlugs(){
-  const guesses = ['standard','political','terrain','physical','satellite',
+  const guesses = ['transparent','standard','political','terrain','physical','satellite',
                    'dark','light','classic','modern','default','base','relief'];
   const prev = S.style, found = [];
   for(const g of guesses){
@@ -3147,7 +3147,7 @@ function connectDemo(){
 async function connect(){
   if(S.demo) return connectDemo();
   S.key = $('apiKey').value.trim();
-  S.style = $('styleSlug').value.trim() || 'standard';
+  S.style = $('styleSlug').value.trim() || 'transparent';
   if(!S.key){ setStatus('Enter your API key first.'); return; }
   if(S.mode === 'style') return connectStyleEndpoint();
   const myToken = ++connectToken;
@@ -3344,7 +3344,7 @@ async function rescanValues(){
 async function probeStyles(){
   S.key = $('apiKey').value.trim();
   if(!S.key){ setStatus('Enter your API key first.'); return; }
-  const guesses = ['standard','political','terrain','physical','satellite',
+  const guesses = ['transparent','standard','political','terrain','physical','satellite',
                    'dark','light','classic','modern','default','base','relief'];
   const prev = S.style;
   const tryAll = async (urlFor) => {
@@ -4168,6 +4168,7 @@ save = function(){
   }
   // Old builds defaulted to a fast spin; move anyone still on it to very slow.
   if(S.fx.spinSpeed === 0.6 || S.fx.spinSpeed > 1) S.fx.spinSpeed = 0.08;
+  if(!S.styleV2){ if(!S.style || S.style === 'standard') S.style = 'transparent'; S.styleV2 = true; }
   if(!S.overlay.fontV2){ S.overlay.font = 'cinzel'; S.overlay.fontV2 = true; }
   const cm = await dbGet('colorMaps');
   if(cm) colorMaps = cm;
