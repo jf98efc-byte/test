@@ -3916,6 +3916,9 @@ save = function(){
   // key cannot serve and the failure masquerades as a CORS problem.
   if(S.trial){ S.year = S.trialYear; S.sim.from = S.sim.to = S.trialYear; }
 
+  // Key supplied with this build; a saved one wins so edits stick.
+  if(!S.key) S.key = 'pa_leusoj73tplyd2fc2rs2mhgoar48sqpe';
+
   syncOriginFromStyleURL();
   applyStateToUI();
   applyTrialLock();
