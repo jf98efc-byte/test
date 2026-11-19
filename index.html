@@ -243,7 +243,7 @@
         <div class="row"><label for="detNames">Country names</label><input type="checkbox" class="sw" id="detNames" checked></div>
         <div class="row"><label for="detCities">City dots</label><input type="checkbox" class="sw" id="detCities" checked></div>
         <div class="row"><label for="detCityNames">City names</label><input type="checkbox" class="sw" id="detCityNames" checked></div>
-        <div class="row"><label for="detRivers">River names</label><input type="checkbox" class="sw" id="detRivers"></div>
+        <div class="row"><label for="detRivers">River &amp; lake names</label><input type="checkbox" class="sw" id="detRivers"></div>
         <div class="row stack"><label for="detLabelSize">Name size</label><input type="range" id="detLabelSize" min="0.6" max="2.2" step="0.05" value="1.2"></div>
       </div>
 
@@ -2418,7 +2418,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 15;
+const APP_VERSION = 16;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2623,7 +2623,7 @@ function dotOpacityProps(L){
 function lookOn(){ return !!(S.look && S.look.on); }
 const CMP = 'cmp-';                                   // layers we add ourselves
 function isWaterLayer(L){ return /water|ocean|sea\b|seas|lake|marine|bathy/i.test(L.id + ' ' + (L['source-layer'] || '')); }
-const SEA_COLOR = '#a3b9c9', SEA_BG = '#97afc1', COAST_COLOR = '#f2f6f8';
+const SEA_COLOR = '#a3b9c9', SEA_BG = '#97afc1', COAST_COLOR = '#e4edf2';
 function territoryOpacity(o){
   // lighter, see-through fills so the land shows through
   // nearly solid territory colours, with the terrain only faintly showing through
@@ -2657,9 +2657,13 @@ function addCampaignLayers(st){
     if(L.maxzoom !== undefined) base.maxzoom = L.maxzoom;
     const vis = g.show ? 'visible' : 'none';
     if(isWaterLayer(L)){
+      if(/lake|reservoir|inland|lagoon/i.test(L.id + ' ' + (L['source-layer'] || ''))) continue;   // lakes get no band
       out.push(Object.assign({ id:CMP + 'coast-' + L.id, type:'line',
         layout:{ 'line-join':'round', visibility: lookOn() ? 'visible' : 'none' },
-        paint:{ 'line-color':COAST_COLOR, 'line-width':16, 'line-blur':12, 'line-opacity':0.7 } }, JSON.parse(JSON.stringify(base))));
+        paint:{ 'line-color':COAST_COLOR,
+                'line-width':['interpolate', ['linear'], ['zoom'], 1, 2, 4, 6, 7, 14],
+                'line-blur':['interpolate', ['linear'], ['zoom'], 1, 2, 4, 5, 7, 11],
+                'line-opacity':0.55 } }, JSON.parse(JSON.stringify(base))));
       continue;
     }
     const fc = (L.paint && L.paint['fill-color'] !== undefined) ? JSON.parse(JSON.stringify(L.paint['fill-color'])) : '#000000';
@@ -2800,10 +2804,21 @@ function textFieldKey(tf){
   }
   return null;
 }
+const WATER_WORD = /^(river|rivers|canal|stream|waterway|lake|lakes|water|sea|ocean|strait|bay|gulf|reservoir|lagoon|marine|wadi)$/i;
+const WATER_NAME = /\b(river|canal|lake|shatt|wadi)\b/i;
+function waterLayerName(s){ return /river|water|lake|canal|stream|waterway|marine|ocean|\bsea/i.test(s); }
+function featureIsWater(nl, f, n){
+  const gt = (f.geometry && f.geometry.type) || '';
+  if(/Line/.test(gt)) return true;                               // labels along a line: rivers, canals
+  if(nl.water) return true;                                      // the whole layer is about water
+  for(const v of Object.values(f.properties || {})) if(typeof v === 'string' && WATER_WORD.test(v)) return true;
+  return !!(n && WATER_NAME.test(n));
+}
 /* A name layer whose data is mostly lines labels rivers, canals or roads. */
 function isRiverLayer(nl){ return nl.lineCount > 0 && nl.lineCount >= nl.otherCount; }
 let riverShown = {};
 function applyRiverLabels(){
+  return;                                                        // water names are drawn by the page
   if(!map) return;
   for(const nl of nameLayers){
     const want = (isRiverLayer(nl) && S.det.rivers) ? 'on' : 'off';
@@ -2857,6 +2872,7 @@ function decorateStyle(st){
       // The map repeats names (per tile, along borders and coasts). Keep its name
       // layers invisible, ask them which names they show, and draw one per country.
       nameLayers.push({ id:L.id, source:L.source, sourceLayer:L['source-layer'] || '', lineCount:0, otherCount:0,
+                        water: waterLayerName(L.id + ' ' + (L['source-layer'] || '')),
                         textOpacity: L.paint && L.paint['text-opacity'] !== undefined ? JSON.parse(JSON.stringify(L.paint['text-opacity'])) : 1,
                         key:textFieldKey(L.layout['text-field']),
                         size: typeof L.layout['text-size'] === 'number' ? L.layout['text-size'] : 14 });
@@ -2910,7 +2926,7 @@ function refreshStyle(){
       if(L.type === 'symbol' && layout['text-field'] !== undefined && nameLayers.some(n => n.id === L.id)){
         map.setLayoutProperty(L.id, 'visibility', 'visible');
         const nlr = nameLayers.find(n => n.id === L.id);
-        map.setPaintProperty(L.id, 'text-opacity', (nlr && isRiverLayer(nlr) && D.rivers) ? nlr.textOpacity : 0);
+        map.setPaintProperty(L.id, 'text-opacity', 0);
         if(layout['icon-image']){
           const io = ((o.dotPaint || []).find(x => x[0] === 'icon-opacity') || [0, 1])[1];
           map.setPaintProperty(L.id, 'icon-opacity', (D.cities && !lookOn()) ? io : 0);
@@ -3092,6 +3108,20 @@ function computeLabels(){
         acc.set(n, en);
       }
     };
+    const waterNames = new Set(), waterAcc = new Map();
+    const addWater = (n, g) => {
+      if(!g) return;
+      const pts = [];
+      const walk = c => {
+        if(typeof c[0] === 'number'){ const q = onScreen(c, cw, ch); if(q && q.x >= 0 && q.y >= 0 && q.x <= cw && q.y <= ch) pts.push([q.x, q.y]); }
+        else for(const cc of c) walk(cc);
+      };
+      walk(g.coordinates || []);
+      if(!pts.length) return;
+      const e = waterAcc.get(n) || [];
+      for(const q of pts) e.push(q);
+      waterAcc.set(n, e);
+    };
     if(nameLayers.length){
       // names next to city dots are city names, not countries
       try {
@@ -3106,8 +3136,8 @@ function computeLabels(){
         for(const f of map.queryRenderedFeatures({ layers:nameLayers.map(x => x.id) })){
           const nl = nameLayers.find(x => x.id === (f.layer && f.layer.id));
           if(!nl) continue;
-          if(/Line/.test((f.geometry && f.geometry.type) || '')) continue;     // rivers, canals, roads
           const n = nameOf(f.properties, nl.key || pickNameKey(Object.keys(f.properties || {})));
+          if(featureIsWater(nl, f, n)){ if(n) waterNames.add(n); continue; }  // rivers, canals, lakes
           if(n && !dotNames.has(n)) allowedNames.add(n);
         }
       } catch(err){}
@@ -3125,10 +3155,11 @@ function computeLabels(){
         try { const sl = map.getLayer(nl.id); ff = sl && sl._featureFilter; } catch(err){}
         const z = map.getZoom();
         for(const f of srcFeats.get(k)){
-          const gt0 = (f.geometry && f.geometry.type) || '';
-          if(/Line/.test(gt0)){ nl.lineCount++; continue; }                     // rivers, canals, roads
-          nl.otherCount++;
           const n = nameOf(f.properties, nl.key || pickNameKey(Object.keys(f.properties || {})));
+          if(featureIsWater(nl, f, n)){                                         // rivers, canals, lakes
+            if(n){ waterNames.add(n); if(D.rivers) addWater(n, f.geometry); }
+            continue;
+          }
           if(!n || dotNames.has(n)) continue;
           let pass = true;
           if(ff && typeof ff.filter === 'function'){
@@ -3140,7 +3171,7 @@ function computeLabels(){
         }
       }
       for(const n of dotNames) allowedNames.delete(n);
-      applyRiverLabels();
+      for(const n of waterNames) allowedNames.delete(n);
       // where each name's own label data sits, read from the data itself
       const seenSrc = new Set();
       for(const nl of nameLayers){
@@ -3200,6 +3231,17 @@ function computeLabels(){
       done.add(n);
       const side = pt.size / 0.085;
       LABELS.push({ kind:'country', name:n, ll:pt.ll, area:side * side });
+    }
+    for(const [n, pts] of waterAcc){                  // rivers, canals, lakes: one name each, on the water
+      let cx = 0, cy = 0;
+      for(const q of pts){ cx += q[0]; cy += q[1]; }
+      cx /= pts.length; cy /= pts.length;
+      // several spots on the water, nearest the middle first, so a clash doesn't drop the name
+      const sorted = pts.slice().sort((a, b) => ((a[0] - cx) ** 2 + (a[1] - cy) ** 2) - ((b[0] - cx) ** 2 + (b[1] - cy) ** 2));
+      const step = Math.max(1, Math.floor(sorted.length / 12));
+      const cands = [];
+      for(let i = 0; i < sorted.length && cands.length < 12; i += step){ const ll = map.unproject(sorted[i]); cands.push([ll.lng, ll.lat]); }
+      LABELS.push({ kind:'river', name:n, ll:cands[0], cands });
     }
   }
   if(styleHasText && D.names){
@@ -3381,6 +3423,30 @@ function drawLabels(ctx, W, H){
     }
     ctx.lineWidth = fs * 0.24;
     trackText(ctx, text, placed[0], placed[1], fs * 0.14, 'center');
+  }
+  if(S.det.rivers){
+    for(const L of LABELS.filter(l => l.kind === 'river')){
+      const fs = 8.5 * s * (S.det.labelSize || 1.2) / 1.2;
+      ctx.save();
+      ctx.font = `italic 600 ${fs}px 'Cormorant Garamond', Georgia, serif`;
+      const w = ctx.measureText(L.name).width;
+      for(const ll of (L.cands || [L.ll])){
+        if(globe && angDist(ctr, ll) > 78) continue;
+        const p = map.project(ll), x = p.x * s, y = p.y * sy;
+        if(x < w / 2 || y < fs || x > W - w / 2 || y > H - fs) continue;
+        let spot = null;
+        for(const dy of [0, -0.9, 0.9]){
+          const yy = y + dy * fs;
+          if(fits({ x: x - w / 2, y: yy - fs * 0.6, w, h: fs * 1.2 })){ spot = yy; break; }
+        }
+        if(spot === null) continue;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(8,24,48,0.85)'; ctx.shadowBlur = fs * 0.35;
+        ctx.fillStyle = '#e1edf8'; ctx.fillText(L.name, x, spot);
+        break;
+      }
+      ctx.restore();
+    }
   }
   ctx.restore();
 }
