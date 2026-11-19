@@ -246,6 +246,7 @@
         <div class="row"><label for="detCities">City dots</label><input type="checkbox" class="sw" id="detCities" checked></div>
         <div class="row"><label for="detCityNames">City names</label><input type="checkbox" class="sw" id="detCityNames" checked></div>
         <div class="row"><label for="detRivers">River &amp; lake names</label><input type="checkbox" class="sw" id="detRivers"></div>
+        <div class="row"><label for="detHideMicro">Hide tiny-country capitals</label><input type="checkbox" class="sw" id="detHideMicro" checked></div>
         <div class="row stack"><label for="detLabelSize">Name size</label><input type="range" id="detLabelSize" min="0.6" max="2.2" step="0.05" value="1.2"></div>
       </div>
 
@@ -2420,7 +2421,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 18;
+const APP_VERSION = 19;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2470,7 +2471,7 @@ const S = {
   preview: 'fit',
   safe: false,
   look: { on:true, strength:0.7, glow:0.6, paper:0 },   // campaign-map style
-  det: { terrain:false, rivers:false, trad:false, fillNameKey:null, names:true, cities:true, cityNames:true, labelSize:1.2,
+  det: { terrain:false, rivers:false, trad:false, fillNameKey:null, hideMicro:true, names:true, cities:true, cityNames:true, labelSize:1.2,
          only:false, chosen:[], phersuKey:null },
   saveData: true,        // keep every style/tile we download, reuse it for free
   offline: false         // never touch the API; only use what is already saved
@@ -2912,6 +2913,34 @@ function applyRiverLabels(){
     try { map.setPaintProperty(nl.id, 'text-opacity', want === 'on' ? nl.textOpacity : 0); } catch(e){}
   }
 }
+/* Capitals of the tiniest countries: hidden by default so they don't clutter
+   the map (Vaduz, San Marino, Monaco...). Compared without accents or dots. */
+const MICRO_CAPITALS = new Set([
+  // Europe
+  'vaduz', 'san marino', 'city of san marino', 'citta di san marino', 'monaco', 'monacoville', 'monte carlo',
+  'vatican city', 'vatican', 'citta del vaticano', 'andorra la vella', 'valletta', 'la valletta',
+  // Caribbean
+  'basseterre', 'st georges', 'saint georges', 'kingstown', 'castries', 'roseau', 'st johns', 'saint johns', 'bridgetown',
+  // Pacific
+  'yaren', 'funafuti', 'ngerulmud', 'melekeok', 'koror', 'majuro', 'palikir', 'tarawa', 'south tarawa', 'bairiki',
+  'nukualofa', 'apia', 'port vila', 'honiara',
+  // Indian Ocean, Africa, Asia
+  'male', 'moroni', 'port louis', 'sao tome', 'manama', 'singapore'
+]);
+function normName(n){
+  return String(n).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/[.'’ʻ`-]/g, '').replace(/\s+/g, ' ').trim();
+}
+function isMicroCapital(n){ return MICRO_CAPITALS.has(normName(n)); }
+const microSeen = new Set();           // their names exactly as the map spells them
+function microDotFilter(orig){
+  const key = S.det.dotNameKey, names = Array.from(microSeen);
+  if(!S.det.hideMicro || !key || !names.length) return orig || null;
+  if(orig && isLegacyFilter(orig)) return ['all', orig, ['!in', key].concat(names)];
+  const not = ['!', ['in', ['to-string', ['coalesce', ['get', key], '']], ['literal', names]]];
+  return orig ? ['all', orig, not] : not;
+}
+
 function nameKeyNow(){ return S.det.phersuKey; }
 function pickNameKey(keys){
   const pref = ['name_en','name','NAME','Name','label','polity','polity_name','title','country','state','entity','realm'];
@@ -2972,6 +3001,8 @@ function decorateStyle(st){
     }
     if(L.type === 'circle' || (L.type === 'symbol' && L.layout['icon-image'])){
       L.layout.visibility = D.cities ? 'visible' : 'none';
+      const mf = microDotFilter(origLayer[L.id].filter);
+      if(mf) L.filter = mf; else delete L.filter;
       if(hiding || lookOn()){ L.paint = L.paint || {}; for(const k of dotOpacityProps(L)) L.paint[k] = 0; }   // we draw our own markers
       continue;                                // city names aren't country names
     }
@@ -3023,6 +3054,7 @@ function refreshStyle(){
       }
       if(L.type === 'circle' || (L.type === 'symbol' && layout['icon-image'])){
         map.setLayoutProperty(L.id, 'visibility', D.cities ? 'visible' : 'none');
+        map.setFilter(L.id, microDotFilter(o.filter));
         // while hiding, the map's own dots go transparent (their data must stay
         // loaded) and we draw dots only for cities inside chosen countries
         for(const [k, v] of (o.dotPaint || dotOpacityProps(L).map(k => [k, 1]))) map.setPaintProperty(L.id, k, (hiding || lookOn()) ? 0 : v);
@@ -3359,8 +3391,14 @@ function computeLabels(){
     const seen = new Set();
     for(const f of feats){
       if(!f.geometry || f.geometry.type !== 'Point') continue;
-      const n = nameOf(f.properties, pickNameKey(Object.keys(f.properties || {})));
+      const dk = pickNameKey(Object.keys(f.properties || {}));
+      const n = nameOf(f.properties, dk);
       if(!n || seen.has(n)) continue;
+      if(isMicroCapital(n)){
+        if(dk && S.det.dotNameKey !== dk){ S.det.dotNameKey = dk; save(); }
+        if(!microSeen.has(n)){ microSeen.add(n); if(S.det.hideMicro) setTimeout(refreshStyle, 0); }
+        if(S.det.hideMicro) continue;                                   // tiny-country capital
+      }
       const ll = f.geometry.coordinates.slice(0, 2);
       if(!onScreen(ll, cw, ch)) continue;
       if(hiding && !chosenRings.some(r => inRingLL(ll, r))) continue;   // not in a chosen country
@@ -5135,7 +5173,7 @@ function wire(){
   $('connectBtn').onclick = connect;
   $('probeBtn').onclick = probeStyles;
   $('resetBtn').onclick = resetSaved;
-  const detBind = [['detNames','names'],['detCities','cities'],['detCityNames','cityNames'],['detRivers','rivers'],['detTrad','trad']];
+  const detBind = [['detNames','names'],['detCities','cities'],['detCityNames','cityNames'],['detRivers','rivers'],['detTrad','trad'],['detHideMicro','hideMicro']];
   for(const [id, prop] of detBind){
     $(id).addEventListener('change', e => {
       S.det[prop] = e.target.checked;
@@ -5268,6 +5306,7 @@ function applyStateToUI(){
   $('detCityNames').checked = !!S.det.cityNames;
   $('detRivers').checked = !!S.det.rivers;
   $('detTrad').checked = !!S.det.trad;
+  $('detHideMicro').checked = S.det.hideMicro !== false;
   $('detLabelSize').value = S.det.labelSize || 1.2;
   $('lookOn').checked = !!S.look.on;
   $('lookGlow').value = S.look.glow;
