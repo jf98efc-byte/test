@@ -347,6 +347,7 @@
         </div>
         <div class="hint">Counts are for this visit.</div>
         <button id="clearCacheBtn" class="wide">Clear saved maps</button>
+        <div class="hint" id="appVersion" style="text-align:center;margin-top:10px;"></div>
       </div>
 
       <details class="group adv">
@@ -386,6 +387,7 @@
         </div>
         <div class="row" style="margin-top:12px;"><label for="maxZoom">Max zoom</label><input type="number" id="maxZoom" value="10" min="1" max="22" inputmode="numeric"></div>
         <div class="hint" id="zoomNote">Set to Phersu’s limit automatically when the map loads.</div>
+        <div class="hint" id="mapInfo" style="word-break:break-word;"></div>
         <button id="resetBtn" class="wide danger">Reset all settings</button>
       </details>
     </section>
@@ -2398,6 +2400,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
+const APP_VERSION = 11;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2588,7 +2591,8 @@ let pickChoosing = false;       // "tap countries on the map" mode
 let origLayer = {};
 let styleHasText = false;       // true only for name layers we could NOT read (left as they are)
 let nameLayers = [];            // the map's own name layers we read: we draw one name per country instead
-let allowedNames = new Set();   // names those layers actually show (respects the map's own filters)       // the map draws its own names (Phersu does)             // layer id -> its filter / fill-opacity as the style defined them
+let allowedNames = new Set();   // names those layers actually show (respects the map's own filters)
+let dotNames = new Set();       // names that belong to city dots, not countries       // the map draws its own names (Phersu does)             // layer id -> its filter / fill-opacity as the style defined them
 let LABELS = [];
 const knownNames = new Set();
 
@@ -2635,6 +2639,7 @@ function decorateStyle(st){
   styleHasText = false;
   nameLayers = [];
   allowedNames = new Set();
+  dotNames = new Set();
   for(const L of st.layers){
     if(L.id === 'terrain' || L.type === 'background' || L.type === 'raster') continue;
     L.layout = L.layout || {};
@@ -2642,20 +2647,18 @@ function decorateStyle(st){
                         opacity: L.paint && L.paint['fill-opacity'] !== undefined ? JSON.parse(JSON.stringify(L.paint['fill-opacity'])) : undefined,
                         visibility: L.layout.visibility || 'visible',
                         dotPaint: dotOpacityProps(L).map(k => [k, L.paint && L.paint[k] !== undefined ? JSON.parse(JSON.stringify(L.paint[k])) : 1]) };
-    if(L.type === 'symbol' && L.layout['text-field'] !== undefined && !L.layout['icon-image']){
-      const k = textFieldKey(L.layout['text-field']);
-      if(k && L.source){
-        // The map labels every tile a country touches, so names repeat. Keep the
-        // layer (invisible) to learn which names it shows, and draw one each ourselves.
-        nameLayers.push({ id:L.id, source:L.source, sourceLayer:L['source-layer'] || '', key:k,
-                          size: typeof L.layout['text-size'] === 'number' ? L.layout['text-size'] : 14 });
-        L.layout.visibility = 'visible';
-        // place every name (invisibly) so asking "which names does it show" isn't cut short by crowding
-        L.layout['text-allow-overlap'] = true; L.layout['text-ignore-placement'] = true;
-        L.paint = L.paint || {}; L.paint['text-opacity'] = 0; L.paint['icon-opacity'] = 0;
-      } else {
-        styleHasText = true;
-        L.layout.visibility = D.names ? 'visible' : 'none';   // couldn't read it: leave the map's own names
+    if(L.type === 'symbol' && L.layout['text-field'] !== undefined && L.source){
+      // The map repeats names (per tile, along borders and coasts). Keep its name
+      // layers invisible, ask them which names they show, and draw one per country.
+      nameLayers.push({ id:L.id, source:L.source, sourceLayer:L['source-layer'] || '',
+                        key:textFieldKey(L.layout['text-field']),
+                        size: typeof L.layout['text-size'] === 'number' ? L.layout['text-size'] : 14 });
+      L.layout.visibility = 'visible';
+      L.layout['text-allow-overlap'] = true; L.layout['text-ignore-placement'] = true;
+      L.paint = L.paint || {}; L.paint['text-opacity'] = 0;
+      if(L.layout['icon-image']){                          // a city marker with its name
+        const io = (origLayer[L.id].dotPaint.find(x => x[0] === 'icon-opacity') || [0, 1])[1];
+        L.paint['icon-opacity'] = D.cities ? io : 0;
       }
       continue;
     }
@@ -2691,9 +2694,13 @@ function refreshStyle(){
     const o = origLayer[L.id] || { filter:null, opacity:undefined, visibility:'visible' };
     const layout = L.layout || {};
     try {
-      if(L.type === 'symbol' && layout['text-field'] !== undefined && !layout['icon-image']){
-        if(nameLayers.some(n => n.id === L.id)){ map.setLayoutProperty(L.id, 'visibility', 'visible'); map.setPaintProperty(L.id, 'text-opacity', 0); }
-        else map.setLayoutProperty(L.id, 'visibility', D.names ? 'visible' : 'none');
+      if(L.type === 'symbol' && layout['text-field'] !== undefined && nameLayers.some(n => n.id === L.id)){
+        map.setLayoutProperty(L.id, 'visibility', 'visible');
+        map.setPaintProperty(L.id, 'text-opacity', 0);
+        if(layout['icon-image']){
+          const io = ((o.dotPaint || []).find(x => x[0] === 'icon-opacity') || [0, 1])[1];
+          map.setPaintProperty(L.id, 'icon-opacity', D.cities ? io : 0);
+        }
         continue;
       }
       if(L.type === 'circle' || (L.type === 'symbol' && layout['icon-image'])){
@@ -2748,6 +2755,27 @@ function angDist(a, b){
   const la1 = a.lat * r, la2 = b[1] * r, dl = (b[0] - a.lng) * r;
   const c = Math.sin(la1) * Math.sin(la2) + Math.cos(la1) * Math.cos(la2) * Math.cos(dl);
   return Math.acos(clamp(c, -1, 1)) / r;
+}
+/* Cut a screen-space polygon down to the visible rectangle (Sutherland–Hodgman),
+   so a name goes in the middle of the part you can see. */
+function clipToRect(pts, w, h){
+  const edges = [
+    [q => q[0] >= 0, (a, b) => { const k = (0 - a[0]) / (b[0] - a[0]); return [0, a[1] + k * (b[1] - a[1])]; }],
+    [q => q[0] <= w, (a, b) => { const k = (w - a[0]) / (b[0] - a[0]); return [w, a[1] + k * (b[1] - a[1])]; }],
+    [q => q[1] >= 0, (a, b) => { const k = (0 - a[1]) / (b[1] - a[1]); return [a[0] + k * (b[0] - a[0]), 0]; }],
+    [q => q[1] <= h, (a, b) => { const k = (h - a[1]) / (b[1] - a[1]); return [a[0] + k * (b[0] - a[0]), h]; }]
+  ];
+  let out = pts;
+  for(const [inside, cut] of edges){
+    const inp = out; out = [];
+    if(!inp.length) break;
+    for(let i = 0; i < inp.length; i++){
+      const cur = inp[i], prev = inp[(i + inp.length - 1) % inp.length];
+      if(inside(cur)){ if(!inside(prev)) out.push(cut(prev, cur)); out.push(cur); }
+      else if(inside(prev)) out.push(cut(prev, cur));
+    }
+  }
+  return out;
 }
 function pointInPoly(pt, pts){
   let inside = false;
@@ -2818,52 +2846,11 @@ function computeLabels(){
       for(const poly of polys) if(poly && poly[0]) chosenRings.push(poly[0]);
     }
   }
-  // which names the map's own (invisible) name layers show — they follow the map's filters
-  if(nameLayers.length){
-    try {
-      for(const f of map.queryRenderedFeatures({ layers:nameLayers.map(n => n.id) })){
-        const nl = nameLayers.find(n => n.id === (f.layer && f.layer.id));
-        const n = nl && nameOf(f.properties, nl.key);
-        if(n) allowedNames.add(n);
-      }
-    } catch(e){}
-  }
-  const groups = [];
-  if(nameLayers.length){
-    const dotSrc = new Set();
-    try {
-      for(const L of map.getStyle().layers || []) if(dotLayerIds().includes(L.id)) dotSrc.add(L.source + '|' + (L['source-layer'] || ''));
-    } catch(e){}
-    const seenSrc = new Set();
-    for(const nl of nameLayers){
-      const k = nl.source + '|' + nl.sourceLayer;
-      if(seenSrc.has(k)) continue;
-      seenSrc.add(k);
-      let feats = [];
-      try { feats = map.querySourceFeatures(nl.source, nl.sourceLayer ? { sourceLayer:nl.sourceLayer } : {}); } catch(e){}
-      groups.push({ feats, key:nl.key, size:nl.size, cityLayer:dotSrc.has(k) });
-    }
-  } else if(!styleHasText){
-    groups.push({ feats:fillFeats, key:null, size:14, cityLayer:false });
-  }
-  if(D.names && groups.length){
-    const acc = new Map(), pointAcc = new Map();
-    for(const grp of groups)
-    for(const f of grp.feats){
-      const key = grp.key || nameKeyNow() || pickNameKey(Object.keys(f.properties || {}));
-      const n = nameOf(f.properties, key);
-      if(!n) continue;
-      if(allowedNames.size && !allowedNames.has(n)) continue;
-      if(f.geometry && f.geometry.type === 'Point'){
-        if(grp.cityLayer || pointAcc.has(n)) continue;          // city names are handled with the dots
-        const ll = f.geometry.coordinates.slice(0, 2);
-        if(onScreen(ll, cw, ch)) pointAcc.set(n, { ll, size:grp.size });
-        continue;
-      }
-      knownNames.add(n);
-      if(hidingNow && !S.det.chosen.includes(n)) continue;
-      const g = f.geometry || {};
-      const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+  if(D.names){
+    const accFill = new Map(), accLabel = new Map(), pointAcc = new Map(), lineAcc = new Map();
+    // add a polygon's in-view area to a name's running centroid
+    const addPoly = (acc, n, g) => {
+      const polys = !g ? [] : g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
       for(const poly of polys){
         const ring = poly && poly[0];
         if(!ring || ring.length < 3) continue;
@@ -2871,12 +2858,12 @@ function computeLabels(){
         const pts = [];
         for(let i = 0; i < ring.length; i += step){
           if(globe && angDist(ctr, ring[i]) > 80) continue;
-          const p = map.project(ring[i]); pts.push([p.x, p.y]);
+          const q = map.project(ring[i]); pts.push([q.x, q.y]);
         }
-        // keep only the part of the country that is actually in view
-        const vis = pts.filter(q => q[0] >= 0 && q[1] >= 0 && q[0] <= cw && q[1] <= ch);
-        if(!vis.length && !(pts.length && pointInPoly([cw / 2, ch / 2], pts))) continue;
         if(pts.length < 3) continue;
+        const clipped = clipToRect(pts, cw, ch);          // only the part on screen
+        if(clipped.length < 3) continue;
+        pts.length = 0; for(const q of clipped) pts.push(q);
         let a = 0, cx = 0, cy = 0;
         for(let i = 0, j = pts.length - 1; i < pts.length; j = i++){
           const cr = pts[j][0] * pts[i][1] - pts[i][0] * pts[j][1];
@@ -2884,21 +2871,113 @@ function computeLabels(){
         }
         if(Math.abs(a) < 2) continue;
         const c = [cx / (3 * a), cy / (3 * a)], A = Math.abs(a) / 2;
-        const e = acc.get(n) || { a:0, x:0, y:0, bigA:0, big:null, bigC:null };
-        e.a += A; e.x += c[0] * A; e.y += c[1] * A;
-        if(A > e.bigA){ e.bigA = A; e.big = pts; e.bigC = c; }
-        acc.set(n, e);
+        const en = acc.get(n) || { a:0, x:0, y:0, bigA:0, big:null, bigC:null };
+        en.a += A; en.x += c[0] * A; en.y += c[1] * A;
+        if(A > en.bigA){ en.bigA = A; en.big = pts; en.bigC = c; }
+        acc.set(n, en);
+      }
+    };
+    if(nameLayers.length){
+      // names next to city dots are city names, not countries
+      try {
+        const ids = dotLayerIds();
+        if(ids.length) for(const f of map.queryRenderedFeatures({ layers:ids })){
+          const n = nameOf(f.properties, pickNameKey(Object.keys(f.properties || {})));
+          if(n) dotNames.add(n);
+        }
+      } catch(err){}
+      // which names the map's own (invisible) name layers show — this follows the map's own rules
+      try {
+        for(const f of map.queryRenderedFeatures({ layers:nameLayers.map(x => x.id) })){
+          const nl = nameLayers.find(x => x.id === (f.layer && f.layer.id));
+          if(!nl) continue;
+          const n = nameOf(f.properties, nl.key || pickNameKey(Object.keys(f.properties || {})));
+          if(n && !dotNames.has(n)) allowedNames.add(n);
+        }
+      } catch(err){}
+      // plus every name in the layer's data that passes the layer's own rules (its filter),
+      // so a country whose label spot happens to be off-screen still gets named
+      const srcFeats = new Map();
+      for(const nl of nameLayers){
+        const k = nl.source + '|' + nl.sourceLayer;
+        if(!srcFeats.has(k)){
+          let feats = [];
+          try { feats = map.querySourceFeatures(nl.source, nl.sourceLayer ? { sourceLayer:nl.sourceLayer } : {}); } catch(err){}
+          srcFeats.set(k, feats);
+        }
+        let ff = null;
+        try { const sl = map.getLayer(nl.id); ff = sl && sl._featureFilter; } catch(err){}
+        const z = map.getZoom();
+        for(const f of srcFeats.get(k)){
+          const n = nameOf(f.properties, nl.key || pickNameKey(Object.keys(f.properties || {})));
+          if(!n || dotNames.has(n)) continue;
+          let pass = true;
+          if(ff && typeof ff.filter === 'function'){
+            const gt = (f.geometry && f.geometry.type) || '';
+            const type = /Point/.test(gt) ? 1 : /Line/.test(gt) ? 2 : 3;
+            try { pass = !!ff.filter({ zoom:z }, { type, properties:f.properties || {}, id:f.id }, null); } catch(err){ pass = true; }
+          }
+          if(pass) allowedNames.add(n);
+        }
+      }
+      for(const n of dotNames) allowedNames.delete(n);
+      // where each name's own label data sits, read from the data itself
+      const seenSrc = new Set();
+      for(const nl of nameLayers){
+        const k = nl.source + '|' + nl.sourceLayer;
+        if(seenSrc.has(k)) continue;
+        seenSrc.add(k);
+        const feats = srcFeats.get(k) || [];
+        for(const f of feats){
+          const n = nameOf(f.properties, nl.key || pickNameKey(Object.keys(f.properties || {})));
+          if(!n || !allowedNames.has(n)) continue;
+          const g = f.geometry || {};
+          if(g.type === 'Point'){
+            if(!pointAcc.has(n) && onScreen(g.coordinates, cw, ch)) pointAcc.set(n, { ll:g.coordinates.slice(0, 2), size:nl.size });
+          } else if(g.type === 'LineString' || g.type === 'MultiLineString'){
+            const lines = g.type === 'LineString' ? [g.coordinates] : g.coordinates;
+            const en = lineAcc.get(n) || { x:0, y:0, c:0, size:nl.size };
+            for(const ln of lines) for(const ll of ln){
+              const q = onScreen(ll, cw, ch);
+              if(q && q.x >= 0 && q.y >= 0 && q.x <= cw && q.y <= ch){ en.x += q.x; en.y += q.y; en.c++; }
+            }
+            lineAcc.set(n, en);
+          } else addPoly(accLabel, n, g);
+        }
+      }
+      // best of all: the country's own coloured shape, matched by its name
+      for(const f of fillFeats){
+        let n = null;
+        for(const v of Object.values(f.properties || {})) if(typeof v === 'string' && allowedNames.has(v)){ n = v; break; }
+        if(n) addPoly(accFill, n, f.geometry);
+      }
+    } else if(!styleHasText){
+      for(const f of fillFeats){
+        const n = nameOf(f.properties, nameKeyNow() || pickNameKey(Object.keys(f.properties || {})));
+        if(n) addPoly(accFill, n, f.geometry);
       }
     }
-    for(const [n, e] of acc){
-      let c = [e.x / e.a, e.y / e.a];
-      if(!pointInPoly(c, e.big)) c = e.bigC;
-      const ll = map.unproject(c);
-      LABELS.push({ kind:'country', name:n, ll:[ll.lng, ll.lat], area:e.a });
+    const done = new Set();
+    for(const acc of [accFill, accLabel]){
+      for(const [n, en] of acc){
+        if(done.has(n)) continue;
+        done.add(n); knownNames.add(n);
+        let c = [en.x / en.a, en.y / en.a];
+        if(!pointInPoly(c, en.big)) c = en.bigC;
+        const ll = map.unproject(c);
+        LABELS.push({ kind:'country', name:n, ll:[ll.lng, ll.lat], area:en.a });
+      }
     }
-    // names that come as single points: one each, at the map's own text size
-    for(const [n, pt] of pointAcc){
-      if(acc.has(n)) continue;
+    for(const [n, en] of lineAcc){                    // names that run along borders or coasts
+      if(done.has(n) || !en.c) continue;
+      done.add(n);
+      const ll = map.unproject([en.x / en.c, en.y / en.c]);
+      const side = en.size / 0.085;
+      LABELS.push({ kind:'country', name:n, ll:[ll.lng, ll.lat], area:side * side });
+    }
+    for(const [n, pt] of pointAcc){                   // names given as single points
+      if(done.has(n)) continue;
+      done.add(n);
       const side = pt.size / 0.085;
       LABELS.push({ kind:'country', name:n, ll:pt.ll, area:side * side });
     }
@@ -2933,6 +3012,7 @@ function computeLabels(){
     }
   }
   refreshPickNames();
+  paintMapInfo();
 }
 let labelTimer = null;
 function scheduleLabels(){
@@ -3017,7 +3097,7 @@ function drawLabels(ctx, W, H){
     const text = L.name.toUpperCase();
     ctx.font = `600 ${fsCss * s}px 'Cinzel', serif`;
     let w = measureTracked(ctx, text, fsCss * s * 0.14);
-    const maxW = side * 1.5 * s;
+    const maxW = Math.min(side * 1.5 * s, W * 0.86);       // never wider than the screen
     if(w > maxW){                                            // shrink long names to fit
       fsCss = Math.max(8 * ls, fsCss * maxW / w);
       ctx.font = `600 ${fsCss * s}px 'Cinzel', serif`;
@@ -3028,7 +3108,8 @@ function drawLabels(ctx, W, H){
     search:
     for(const dy of [0, -1.4, 1.4, -2.6, 2.6]){
       for(const dx of [0, -0.35, 0.35]){
-        const xx = x + dx * w, yy = y + dy * fs;
+        const pad = 6 * s;                                     // keep the whole name on screen
+        const xx = clamp(x + dx * w, w / 2 + pad, W - w / 2 - pad), yy = clamp(y + dy * fs, fs, H - fs);
         if(fits({ x: xx - w / 2, y: yy - fs * 0.75, w, h: fs * 1.5 })){ placed = [xx, yy]; break search; }
       }
     }
@@ -3058,6 +3139,15 @@ function overlayReserve(W, H){
     out.push({ x: 0, y: ay - fs * 1.4, w: W * 0.55, h: fs * 2.1 });
   }
   return out;
+}
+function paintMapInfo(){
+  const el = $('mapInfo');
+  if(!el) return;
+  el.textContent = 'Name layers: ' + (nameLayers.length
+      ? nameLayers.map(n => n.id + ' (' + (n.key || 'auto') + ')').join(', ')
+      : 'none') +
+    ' · Country names found: ' + allowedNames.size +
+    ' · City dots: ' + dotLayerIds().length;
 }
 function refreshPickNames(){
   const dl = $('pickNames');
@@ -4737,6 +4827,7 @@ save = function(){
   // should never quietly spend a map load.
   try { if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e){}
   paintCacheNote();
+  if($('appVersion')) $('appVersion').textContent = 'Version ' + APP_VERSION;
   if(S.mode === 'raw' && S.key) setTimeout(connect, 300);
   else if(S.mode === 'style' && S.key && S.styleURL && S.saveData && await styleIsSaved()){
     // A saved copy costs nothing, so a refresh can reconnect on its own.
