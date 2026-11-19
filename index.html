@@ -2421,7 +2421,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 21;
+const APP_VERSION = 22;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2670,6 +2670,11 @@ function addCampaignLayers(st){
       continue;
     }
     const fc = (L.paint && L.paint['fill-color'] !== undefined) ? JSON.parse(JSON.stringify(L.paint['fill-color'])) : '#000000';
+    out.push(Object.assign({ id:CMP + 'trad-' + L.id, type:'fill',
+      layout:{ visibility: tradOn() ? 'visible' : 'none' },
+      paint:{ 'fill-color': tradOn() ? tradLayerColour(origLayer[L.id]) : '#000000',
+              'fill-opacity': territoryOpacity(origLayer[L.id] ? origLayer[L.id].opacity : undefined) } },
+      JSON.parse(JSON.stringify(base))));
     // soft dark shading just inside each border, then a thin dark border line
     out.push(Object.assign({ id:CMP + 'glow-' + L.id, type:'line',
       layout:{ 'line-join':'round', visibility:vis },
@@ -2776,6 +2781,86 @@ function tradExpr(key, orig){
   expr.push(fallback);
   return expr;
 }
+/* The same rules in plain JS, to work out a name's classic colour. */
+function tradRuleColour(n){
+  for(const [words, , colour] of activeColonial(S.year)) for(const w of words) if(n.includes(w)) return colour;
+  for(const [words, colour] of TRAD_COLOURS) for(const w of words) if(n.includes(w)) return colour;
+  return null;
+}
+/* name -> classic colour, worked out by colour group: Phersu paints colonies in
+   their ruler's colour, so every country sharing a recognised country's colour
+   takes that country's classic colour too (Nigeria with Britain, Angola with
+   Portugal). If a colour is shared by countries with different classic colours,
+   the biggest one decides. */
+// colours of the empires: if one is in a colour group, it decides (France over Morocco)
+const EMPIRE_COLOURS = new Set(['#2a4fa8', '#b8282b', '#2f6f4a', '#e0ad35', '#e07b22', '#d9b13b', '#3f9b4f',
+  '#4f565e', '#3f7f3a', '#b3261e', '#2e6b45', '#ece5d2', '#c8473f', '#c94a4a', '#3a5fcd', '#3d4b5c', '#7d2a8f', '#6b2d8f']);
+let tradByName = new Map();
+let tradSig = '';
+function origFillColourOf(layerId, f){
+  try {
+    const v = map.getLayer(layerId).paint.get('fill-color').evaluate({ type:3, properties:f.properties || {}, id:f.id }, {});
+    return v ? v.toString() : null;
+  } catch(e){ return null; }
+}
+function ringAreaDeg(ring){
+  let a = 0;
+  for(let i = 0, j = ring.length - 1; i < ring.length; j = i++){
+    const k = Math.cos((ring[i][1] + ring[j][1]) * Math.PI / 360);
+    a += (ring[j][0] * k) * ring[i][1] - (ring[i][0] * k) * ring[j][1];
+  }
+  return Math.abs(a) / 2;
+}
+function computeTradGroups(){
+  if(!map || !S.det.trad) return;
+  const key = tradKey();
+  if(!key) return;
+  let st = null; try { st = map.getStyle(); } catch(e){}
+  if(!st) return;
+  const votes = new Map(), nameColour = new Map();
+  for(const L of (st.layers || [])){
+    if(L.type !== 'fill' || L.id.startsWith(CMP) || L.id === 'terrain' || isWaterLayer(L)) continue;
+    let feats = [];
+    try { feats = map.querySourceFeatures(L.source, L['source-layer'] ? { sourceLayer:L['source-layer'] } : {}); } catch(e){}
+    for(const f of feats){
+      const n = nameOf(f.properties, key);
+      if(!n) continue;
+      const c = origFillColourOf(L.id, f);
+      if(!c) continue;
+      if(!nameColour.has(n)) nameColour.set(n, c);
+      const rule = tradRuleColour(n);
+      if(!rule) continue;
+      const g = f.geometry || {};
+      const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+      let area = 0; for(const poly of polys) if(poly && poly[0]) area += ringAreaDeg(poly[0]);
+      const vm = votes.get(c) || new Map();
+      vm.set(rule, (vm.get(rule) || 0) + Math.max(area, 0.0001) * (EMPIRE_COLOURS.has(rule) ? 1000 : 1));
+      votes.set(c, vm);
+    }
+  }
+  for(const [n, c] of nameColour){
+    const vm = votes.get(c);
+    if(!vm) continue;
+    let best = null, bw = -1;
+    for(const [col, w] of vm) if(w > bw){ bw = w; best = col; }
+    if(best) tradByName.set(n, best);
+  }
+  const sig = Array.from(tradByName).map(x => x.join('=')).sort().join('|');
+  if(sig !== tradSig){ tradSig = sig; refreshCampaign(); }
+}
+/* The colour expression for the traditional-colours layer. */
+function tradLayerColour(o){
+  const key = tradKey();
+  const fallback = tradExpr(key, o ? o.fillColor : undefined);       // name rules, then the map's colour
+  if(!tradByName.size) return fallback;
+  const byColour = new Map();
+  for(const [n, c] of tradByName){ if(!byColour.has(c)) byColour.set(c, []); byColour.get(c).push(n); }
+  const expr = ['match', ['to-string', ['coalesce', ['get', key], '']]];
+  for(const [c, names] of byColour) expr.push(names, c);
+  expr.push(fallback);
+  return expr;
+}
+
 function territoryColour(L, o){
   const orig = o ? o.fillColor : undefined;
   return tradOn() ? tradExpr(tradKey(), orig) : orig;
@@ -2789,7 +2874,14 @@ function refreshCampaign(){
   const g = glowPaint();
   for(const L of st.layers){
     try {
-      if(L.id === CMP + 'sea-bg'){
+      if(L.id.startsWith(CMP + 'trad-')){
+        const o = origLayer[L.id.slice((CMP + 'trad-').length)];
+        map.setLayoutProperty(L.id, 'visibility', tradOn() ? 'visible' : 'none');
+        if(tradOn()){
+          map.setPaintProperty(L.id, 'fill-color', tradLayerColour(o));
+          map.setPaintProperty(L.id, 'fill-opacity', territoryOpacity(o ? o.opacity : undefined));
+        }
+      } else if(L.id === CMP + 'sea-bg'){
         map.setLayoutProperty(L.id, 'visibility', lookOn() ? 'visible' : 'none');
       } else if(L.id.startsWith(CMP + 'glow-')){
         map.setLayoutProperty(L.id, 'visibility', g.show ? 'visible' : 'none');
@@ -2806,8 +2898,8 @@ function refreshCampaign(){
         if(isWaterLayer(L)){
           map.setPaintProperty(L.id, 'fill-color', lookOn() ? SEA_COLOR : (o.fillColor !== undefined ? o.fillColor : '#000000'));
         } else if(!pickChoosing){
-          map.setPaintProperty(L.id, 'fill-opacity', territoryOpacity(o.opacity));
-          map.setPaintProperty(L.id, 'fill-color', territoryColour(L, o));
+          map.setPaintProperty(L.id, 'fill-opacity', tradOn() ? 0 : territoryOpacity(o.opacity));
+          map.setPaintProperty(L.id, 'fill-color', o.fillColor !== undefined ? o.fillColor : '#000000');
         }
       }
     } catch(e){ console.warn('campaign', L.id, e); }
@@ -3047,8 +3139,8 @@ function decorateStyle(st){
     L.paint = L.paint || {};
     if(isWaterLayer(L)){ if(lookOn()) L.paint['fill-color'] = SEA_COLOR; }
     else {
-      if(!pickChoosing) L.paint['fill-opacity'] = territoryOpacity(origLayer[L.id].opacity);
-      if(tradOn()) L.paint['fill-color'] = territoryColour(L, origLayer[L.id]);
+      // with traditional colours on, the original layer goes see-through (the trad layer paints instead)
+      if(!pickChoosing) L.paint['fill-opacity'] = tradOn() ? 0 : territoryOpacity(origLayer[L.id].opacity);
     }
   }
   return addCampaignLayers(st);
@@ -3163,7 +3255,7 @@ function pointInPoly(pt, pts){
 function fillLayerIds(){
   let st = null; try { st = map.getStyle(); } catch(e){}
   if(!st) return [];
-  return (st.layers || []).filter(L => L.type === 'fill' && L.id !== 'terrain' && !isWaterLayer(L)).map(L => L.id);
+  return (st.layers || []).filter(L => L.type === 'fill' && L.id !== 'terrain' && !L.id.startsWith(CMP) && !isWaterLayer(L)).map(L => L.id);
 }
 function dotLayerIds(){
   let st = null; try { st = map.getStyle(); } catch(e){}
@@ -3432,6 +3524,7 @@ function computeLabels(){
   }
   refreshPickNames();
   paintMapInfo();
+  computeTradGroups();
 }
 let labelTimer = null;
 function scheduleLabels(){
