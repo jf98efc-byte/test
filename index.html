@@ -239,20 +239,6 @@
       </div>
 
       <div class="group">
-        <div class="gHd">Countries to show</div>
-        <div class="row"><label for="detOnly">Only show chosen countries</label><input type="checkbox" class="sw" id="detOnly"></div>
-        <button id="pickBtn" class="wide">Choose on the map</button>
-        <div class="hint">Tap "Choose on the map", then tap countries on the map above. Everything you don't choose becomes terrain.</div>
-        <div id="chosenList" class="chips"></div>
-        <div class="splitrow" style="margin-top:10px;">
-          <input type="text" id="pickAdd" list="pickNames" placeholder="Or type a name" autocapitalize="words">
-          <button id="pickAddBtn" style="flex:0 0 auto;">Add</button>
-        </div>
-        <datalist id="pickNames"></datalist>
-        <button id="pickClear" class="wide">Clear chosen</button>
-      </div>
-
-      <div class="group">
         <div class="gHd">Globe</div>
         <div class="row stack"><label for="fxSpinSpeed">Spin speed</label>
           <input type="range" id="fxSpinSpeed" min="0" max="1" step="0.01" value="0.08">
@@ -2606,6 +2592,9 @@ function viaCache(u){
   return (typeof u === 'string' && /^https?:\/\//i.test(u)) ? 'pcache://' + u : u;
 }
 function wrapStyleForCache(st){
+  if(st && typeof st.glyphs === 'string') st.glyphs = viaCache(st.glyphs);
+  if(st && typeof st.sprite === 'string') st.sprite = viaCache(st.sprite);
+  else if(st && Array.isArray(st.sprite)) st.sprite = st.sprite.map(s => Object.assign({}, s, { url: viaCache(s.url) }));
   for(const src of Object.values((st && st.sources) || {})){
     if(Array.isArray(src.tiles)) src.tiles = src.tiles.map(viaCache);
     if(typeof src.url === 'string') src.url = viaCache(src.url);    // TileJSON
@@ -2620,7 +2609,8 @@ const TERRAIN_URL = 'https://cdn.jsdelivr.net/gh/freetiler/nasa-bluemarble/tiles
 let lastServerStyle = null;     // Phersu's style as it arrived, for free re-styling
 let layerKey = {};              // layer id -> name property (null = layer has no names)
 let pickChoosing = false;       // "tap countries on the map" mode
-let origLayer = {};             // layer id -> its filter / fill-opacity as the style defined them
+let origLayer = {};
+let styleHasText = false;       // the map draws its own names (Phersu does)             // layer id -> its filter / fill-opacity as the style defined them
 let LABELS = [];
 const knownNames = new Set();
 
@@ -2650,9 +2640,7 @@ function chosenFilter(orig, key, names){
   if(isLegacyFilter(orig)) return ['all', orig, ['in', key].concat(names)];
   return ['all', orig, inExpr(key, names)];
 }
-function hidingActive(){
-  return !!(S.det.only && S.det.chosen.length && nameKeyNow() && !pickChoosing);
-}
+function hidingActive(){ return false; }   // "choose countries" was removed
 function decorateStyle(st){
   st.layers = st.layers || []; st.sources = st.sources || {};
   const D = S.det, key = nameKeyNow(), chosen = D.chosen || [];
@@ -2666,6 +2654,7 @@ function decorateStyle(st){
   }
   const hiding = hidingActive();
   origLayer = {};
+  styleHasText = false;
   for(const L of st.layers){
     if(L.id === 'terrain' || L.type === 'background' || L.type === 'raster') continue;
     L.layout = L.layout || {};
@@ -2674,7 +2663,8 @@ function decorateStyle(st){
                         visibility: L.layout.visibility || 'visible',
                         dotPaint: dotOpacityProps(L).map(k => [k, L.paint && L.paint[k] !== undefined ? JSON.parse(JSON.stringify(L.paint[k])) : 1]) };
     if(L.type === 'symbol' && L.layout['text-field'] !== undefined && !L.layout['icon-image']){
-      L.layout.visibility = 'none';            // names are drawn by us instead
+      styleHasText = true;
+      L.layout.visibility = D.names ? 'visible' : 'none';   // the map's own names
       continue;
     }
     if(L.type === 'circle' || (L.type === 'symbol' && L.layout['icon-image'])){
@@ -2721,7 +2711,7 @@ function refreshStyle(){
     const layout = L.layout || {};
     try {
       if(L.type === 'symbol' && layout['text-field'] !== undefined && !layout['icon-image']){
-        map.setLayoutProperty(L.id, 'visibility', 'none'); continue;
+        map.setLayoutProperty(L.id, 'visibility', D.names ? 'visible' : 'none'); continue;
       }
       if(L.type === 'circle' || (L.type === 'symbol' && layout['icon-image'])){
         map.setLayoutProperty(L.id, 'visibility', D.cities ? 'visible' : 'none');
@@ -2846,7 +2836,7 @@ function computeLabels(){
       for(const poly of polys) if(poly && poly[0]) chosenRings.push(poly[0]);
     }
   }
-  if(D.names){
+  if(D.names && !styleHasText){        // only when the map has no names of its own
     const feats = fillFeats;
     const acc = new Map();
     for(const f of feats){
@@ -2960,13 +2950,13 @@ function drawLabels(ctx, W, H){
       ctx.restore();
     }
     if(!L.label) continue;
-    const fs = 11.5 * s * (S.det.labelSize || 1);
+    const fs = 6.5 * s * (S.det.labelSize || 1.2) / 1.2;   // small by default
     ctx.font = `600 ${fs}px 'Cinzel', serif`;
     ctx.lineWidth = fs * 0.28;
     const w = measureTracked(ctx, L.name, fs * 0.04);
-    const b = { x: x + 5 * s, y: y - fs * 0.7, w, h: fs * 1.4 };
+    const b = { x: x + 4 * s, y: y - fs * 0.7, w, h: fs * 1.4 };
     if(!fits(b)) continue;
-    trackText(ctx, L.name, x + 6 * s, y, fs * 0.04, 'left');
+    trackText(ctx, L.name, x + 4.5 * s, y, fs * 0.04, 'left');
   }
   const countries = LABELS.filter(l => l.kind === 'country').sort((a, b) => b.area - a.area);
   for(const L of countries){
@@ -3347,6 +3337,8 @@ function initMap(){
   map.on('load', () => applyProjection());
   map.on('idle', () => { detectKeys(); scheduleLabels(); });
   map.on('moveend', scheduleLabels);
+  // names appear as soon as the country data is in, without waiting for terrain
+  map.on('sourcedata', e => { if(e && e.sourceId !== 'terrain' && e.isSourceLoaded) scheduleLabels(); });
   let moveRAF = 0;
   map.on('move', () => {                 // keep names glued to the map while dragging
     if(moveRAF) return;
@@ -4499,26 +4491,14 @@ function wire(){
     }
     save();
   });
-  const detBind = [['detTerrain','terrain'],['detNames','names'],['detCities','cities'],['detCityNames','cityNames'],['detOnly','only']];
+  const detBind = [['detTerrain','terrain'],['detNames','names'],['detCities','cities'],['detCityNames','cityNames']];
   for(const [id, prop] of detBind){
     $(id).addEventListener('change', e => {
       S.det[prop] = e.target.checked;
-      if(prop === 'only' && S.det.only && !S.det.chosen.length) setStatus('Tap "Choose on the map" and pick the countries to keep.');
       save(); refreshStyle();
     });
   }
   $('detLabelSize').addEventListener('input', e => { S.det.labelSize = +e.target.value; drawOverlayPreview(); save(); });
-  $('pickBtn').onclick = () => setChoosing(!pickChoosing);
-  $('pickClear').onclick = () => { S.det.chosen = []; afterChosenChange(); };
-  const addByName = () => {
-    const v = $('pickAdd').value.trim();
-    if(!v) return;
-    const match = Array.from(knownNames).find(n => n.toLowerCase() === v.toLowerCase()) || v;
-    if(!S.det.chosen.includes(match)) S.det.chosen.push(match);
-    $('pickAdd').value = ''; afterChosenChange();
-  };
-  $('pickAddBtn').onclick = addByName;
-  $('pickAdd').addEventListener('keydown', e => { if(e.key === 'Enter') addByName(); });
   $('saveData').addEventListener('change', e => { S.saveData = e.target.checked; save(); });
   $('offlineMode').addEventListener('change', e => {
     S.offline = e.target.checked; save();
@@ -4646,9 +4626,7 @@ function applyStateToUI(){
   $('detNames').checked = !!S.det.names;
   $('detCities').checked = !!S.det.cities;
   $('detCityNames').checked = !!S.det.cityNames;
-  $('detOnly').checked = !!S.det.only;
   $('detLabelSize').value = S.det.labelSize || 1.2;
-  renderChosen();
   $('offlineMode').checked = !!S.offline;
   $('styleSlug').value = S.style;
   $('yearSlider').value = S.year; $('yearInput').value = S.year;
@@ -4727,6 +4705,7 @@ save = function(){
   }
   // Old builds defaulted to a fast spin; move anyone still on it to very slow.
   if(S.fx.spinSpeed === 0.6 || S.fx.spinSpeed > 1) S.fx.spinSpeed = 0.08;
+  S.det.only = false; S.det.chosen = [];
   if(!S.styleV2){ if(!S.style || S.style === 'standard') S.style = 'transparent'; S.styleV2 = true; }
   if(!S.overlay.fontV2){ S.overlay.font = 'cinzel'; S.overlay.fontV2 = true; }
   const cm = await dbGet('colorMaps');
