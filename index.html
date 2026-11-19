@@ -2421,7 +2421,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 20;
+const APP_VERSION = 21;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2749,37 +2749,10 @@ const TRAD_COLOURS = [
   [['Ethiopia', 'Abyssinia'], '#3f8f4f'],
   [['Morocco', 'Moroccan'], '#b8402f']
 ];
-/* Colonies whose names don't say who ruled them: [key words, independence year, ruler's colour].
-   Before that year they take the ruler's colour; from it on, their own (or the map's). */
-const PT = '#2f6f4a', FR = '#2a4fa8', GB = '#b8282b', IT = '#3f9b4f', BE = '#d9b13b', DK = '#c8473f';
+/* Angola was Portuguese until 1975, but its name doesn't say so: give it Portugal's colour until then. */
+const PT = '#2f6f4a';
 const TRAD_COLONIAL = [
-  // Portugal
-  [['Angola'], 1975, PT], [['Mozambique'], 1975, PT], [['Cape Verde', 'Cabo Verde'], 1975, PT],
-  [['São Tomé', 'Sao Tome'], 1975, PT], [['Goa'], 1961, PT], [['East Timor', 'Timor-Leste'], 1975, PT],
-  [['Macau', 'Macao'], 1999, PT],
-  // France
-  [['Algeria'], 1962, FR], [['Tunisia'], 1956, FR], [['Morocco'], 1956, FR], [['Senegal'], 1960, FR],
-  [['French Sudan'], 1960, FR], [['Ivory Coast', "Côte d'Ivoire"], 1960, FR], [['Madagascar'], 1960, FR],
-  [['Indochina'], 1954, FR], [['Laos'], 1953, FR], [['Cambodia'], 1953, FR], [['Chad'], 1960, FR],
-  [['Gabon'], 1960, FR], [['Mauritania'], 1960, FR], [['Djibouti'], 1977, FR], [['Syria'], 1946, FR],
-  [['Lebanon'], 1943, FR], [['Dahomey'], 1960, FR], [['Upper Volta'], 1960, FR],
-  // Britain
-  [['India'], 1947, GB], [['Burma'], 1948, GB], [['Ceylon'], 1948, GB], [['Nigeria'], 1960, GB],
-  [['Gold Coast'], 1957, GB], [['Kenya'], 1963, GB], [['Uganda'], 1962, GB], [['Tanganyika'], 1961, GB],
-  [['Nyasaland'], 1964, GB], [['Rhodesia'], 1965, GB], [['Bechuanaland'], 1966, GB], [['Basutoland'], 1966, GB],
-  [['Swaziland'], 1968, GB], [['Sudan'], 1956, GB], [['Malaya'], 1957, GB], [['Sierra Leone'], 1961, GB],
-  [['Gambia'], 1965, GB], [['Jamaica'], 1962, GB], [['Trinidad'], 1962, GB], [['Cyprus'], 1960, GB],
-  [['Malta'], 1964, GB], [['Aden'], 1967, GB], [['Palestine'], 1948, GB], [['Transjordan'], 1946, GB],
-  [['Iraq'], 1932, GB], [['Egypt'], 1922, GB],
-  // Italy, Belgium, Denmark
-  [['Libya'], 1943, IT], [['Eritrea'], 1941, IT], [['Somalia'], 1960, IT],
-  [['Ruanda', 'Urundi'], 1962, BE],
-  [['Iceland'], 1944, DK], [['Greenland'], 9999, DK]
-];
-/* A ruler named in the territory's own name always wins ("French India", "Spanish Morocco"). */
-const RULER_WORDS = [
-  [['French'], FR], [['British', 'English'], GB], [['Portug'], PT], [['Spanish'], '#e0ad35'],
-  [['Italian'], IT], [['Dutch', 'Netherlands'], '#e07b22'], [['Belgian'], BE], [['Danish'], DK]
+  [['Angola'], 1975, PT]
 ];
 function activeColonial(year){
   return TRAD_COLONIAL.filter(r => year < r[1]);
@@ -2796,9 +2769,6 @@ function tradOn(){ return !!(S.det.trad && tradKey()); }
 function tradExpr(key, orig){
   const name = ['to-string', ['coalesce', ['get', key], '']];
   const expr = ['case'];
-  // the most specific split states, then a ruler named in the name, then colonies (for the year shown), then the rest
-  for(const [words, colour] of TRAD_COLOURS.slice(0, 9)) for(const w of words) expr.push(['in', w, name], colour);
-  for(const [words, colour] of RULER_WORDS) for(const w of words) expr.push(['in', w, name], colour);
   for(const [words, , colour] of activeColonial(S.year)) for(const w of words) expr.push(['in', w, name], colour);
   for(const [words, colour] of TRAD_COLOURS) for(const w of words) expr.push(['in', w, name], colour);
   let fallback = orig === undefined ? '#8f8a7a' : orig;
