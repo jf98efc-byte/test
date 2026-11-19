@@ -234,6 +234,8 @@
       <div class="group">
         <div class="gHd">Campaign map style</div>
         <div class="row"><label for="lookOn">Campaign map style</label><input type="checkbox" class="sw" id="lookOn" checked></div>
+        <div class="row"><label for="detTrad">Traditional colours</label><input type="checkbox" class="sw" id="detTrad"></div>
+        <div class="hint" style="margin-top:-4px;margin-bottom:10px;">Well-known countries in their classic map colours — France blue, Britain red, Spain gold, Russia green.</div>
         <div class="row stack"><label for="lookGlow">Border shading</label><input type="range" id="lookGlow" min="0" max="1" step="0.05" value="0.6"></div>
         <div class="hint">Warm old-map colours, thin dark borders, a pale icy sea, red-square cities, serif names and a gold-framed year. Only changes how the map is drawn — no extra API calls.</div>
       </div>
@@ -2418,7 +2420,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 16;
+const APP_VERSION = 17;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2468,7 +2470,7 @@ const S = {
   preview: 'fit',
   safe: false,
   look: { on:true, strength:0.7, glow:0.6, paper:0 },   // campaign-map style
-  det: { terrain:false, rivers:false, names:true, cities:true, cityNames:true, labelSize:1.2,
+  det: { terrain:false, rivers:false, trad:false, fillNameKey:null, names:true, cities:true, cityNames:true, labelSize:1.2,
          only:false, chosen:[], phersuKey:null },
   saveData: true,        // keep every style/tile we download, reuse it for free
   offline: false         // never touch the API; only use what is already saved
@@ -2680,6 +2682,80 @@ function addCampaignLayers(st){
   st.layers = out;
   return st;
 }
+/* --------------------------------------------- traditional country colours
+   Matched on key words in the name, so "Kingdom of France", "French Republic"
+   and "Francia" all come out blue. Anything not listed keeps the map's colour. */
+const TRAD_COLOURS = [
+  [['Soviet', 'USSR', 'U.S.S.R'], '#b3261e'],
+  [['Holy Roman'], '#5f6b3a'],
+  [['Byzantine', 'Eastern Roman'], '#6b2d8f'],
+  [['Austro-Hungar', 'Austria-Hungary'], '#ece5d2'],
+  [['Ottoman'], '#2e6b45'],
+  [['Prussia', 'Brandenburg'], '#3d4b5c'],
+  [['France', 'French', 'Frank', 'Gaul'], '#2a4fa8'],
+  [['England', 'English', 'Britain', 'British', 'United Kingdom'], '#b8282b'],
+  [['Scotland', 'Scottish'], '#2f3f8f'],
+  [['Ireland', 'Irish'], '#3f8f4f'],
+  [['Spain', 'Spanish', 'Castile', 'Castilla', 'Aragon', 'León'], '#e0ad35'],
+  [['Portug'], '#2f6f4a'],
+  [['Netherlands', 'Dutch', 'Holland'], '#e07b22'],
+  [['Belgi'], '#d9b13b'],
+  [['Russia', 'Muscov', "Rus'"], '#3f7f3a'],
+  [['Sweden', 'Swedish'], '#2f7fcf'],
+  [['Denmark', 'Danish'], '#c8473f'],
+  [['Norw'], '#a94a3a'],
+  [['Finland', 'Finnish'], '#e8e6dc'],
+  [['Poland', 'Polish'], '#c9406d'],
+  [['Lithuania'], '#9bb33c'],
+  [['Hungar'], '#a85a2a'],
+  [['Bohemia', 'Czech'], '#d4bd55'],
+  [['Bavaria'], '#79a8d8'],
+  [['Saxony', 'Saxon'], '#7fb069'],
+  [['German', 'Reich'], '#4f565e'],
+  [['Austria', 'Habsburg'], '#ece5d2'],
+  [['Swiss', 'Switzerland', 'Helvet'], '#c0392b'],
+  [['Venice', 'Venetian'], '#21868a'],
+  [['Papal', 'Pope'], '#e8d98a'],
+  [['Savoy', 'Sardinia', 'Piedmont'], '#5b4fa0'],
+  [['Naples', 'Sicil'], '#4b9d7b'],
+  [['Ital'], '#3f9b4f'],
+  [['Greece', 'Greek', 'Hellen'], '#5fa0d6'],
+  [['Serbia'], '#a8433a'],
+  [['Bulgaria'], '#4f8f5a'],
+  [['Romania', 'Wallachia', 'Moldavia'], '#d8b23c'],
+  [['Turkey', 'Turkish', 'Türk'], '#2e6b45'],
+  [['Persia', 'Iran', 'Safavid', 'Sasanian', 'Sassanid', 'Achaemenid', 'Parthia'], '#2a9d8f'],
+  [['Egypt', 'Mamluk'], '#d6b24a'],
+  [['Arab', 'Saudi', 'Caliphate'], '#a3955a'],
+  [['Rome', 'Roman'], '#7d2a8f'],
+  [['Mongol', 'Golden Horde'], '#8a6b3a'],
+  [['China', 'Chinese', 'Qing'], '#e2c044'],
+  [['Japan'], '#c94a4a'],
+  [['Korea'], '#4f7fbf'],
+  [['India', 'Mughal', 'Maratha'], '#4f9a5a'],
+  [['United States', 'America', 'USA'], '#3a5fcd'],
+  [['Canada'], '#b8282b'],
+  [['Mexic'], '#3f8f4f'],
+  [['Brazil'], '#4f9a3a'],
+  [['Ethiopia', 'Abyssinia'], '#3f8f4f'],
+  [['Morocco', 'Moroccan'], '#b8402f']
+];
+function tradKey(){ return S.det.fillNameKey || S.det.phersuKey || null; }
+function tradOn(){ return !!(S.det.trad && tradKey()); }
+function tradExpr(key, orig){
+  const name = ['to-string', ['coalesce', ['get', key], '']];
+  const expr = ['case'];
+  for(const [words, colour] of TRAD_COLOURS) for(const w of words) expr.push(['in', w, name], colour);
+  let fallback = orig === undefined ? '#8f8a7a' : orig;
+  if(typeof fallback !== 'string' && JSON.stringify(fallback).includes('zoom')) fallback = '#8f8a7a';
+  expr.push(fallback);
+  return expr;
+}
+function territoryColour(L, o){
+  const orig = o ? o.fillColor : undefined;
+  return tradOn() ? tradExpr(tradKey(), orig) : orig;
+}
+
 /* Live update of everything the campaign style changes, without a reload. */
 function refreshCampaign(){
   if(!map) return;
@@ -2706,6 +2782,7 @@ function refreshCampaign(){
           map.setPaintProperty(L.id, 'fill-color', lookOn() ? SEA_COLOR : (o.fillColor !== undefined ? o.fillColor : '#000000'));
         } else if(!pickChoosing){
           map.setPaintProperty(L.id, 'fill-opacity', territoryOpacity(o.opacity));
+          map.setPaintProperty(L.id, 'fill-color', territoryColour(L, o));
         }
       }
     } catch(e){ console.warn('campaign', L.id, e); }
@@ -2906,7 +2983,10 @@ function decorateStyle(st){
     if(L.type !== 'fill' || L.id === 'terrain' || !origLayer[L.id]) continue;
     L.paint = L.paint || {};
     if(isWaterLayer(L)){ if(lookOn()) L.paint['fill-color'] = SEA_COLOR; }
-    else if(!pickChoosing) L.paint['fill-opacity'] = territoryOpacity(origLayer[L.id].opacity);
+    else {
+      if(!pickChoosing) L.paint['fill-opacity'] = territoryOpacity(origLayer[L.id].opacity);
+      if(tradOn()) L.paint['fill-color'] = territoryColour(L, origLayer[L.id]);
+    }
   }
   return addCampaignLayers(st);
 }
@@ -3199,7 +3279,14 @@ function computeLabels(){
       // best of all: the country's own coloured shape, matched by its name
       for(const f of fillFeats){
         let n = null;
-        for(const v of Object.values(f.properties || {})) if(typeof v === 'string' && allowedNames.has(v)){ n = v; break; }
+        for(const [kk, v] of Object.entries(f.properties || {})) if(typeof v === 'string' && allowedNames.has(v)){
+          n = v;
+          if(S.det.fillNameKey !== kk){
+            S.det.fillNameKey = kk; save();
+            if(S.det.trad) setTimeout(refreshStyle, 0);          // now we can colour by name
+          }
+          break;
+        }
         if(n) addPoly(accFill, n, f.geometry);
       }
     } else if(!styleHasText){
@@ -5040,7 +5127,7 @@ function wire(){
   $('connectBtn').onclick = connect;
   $('probeBtn').onclick = probeStyles;
   $('resetBtn').onclick = resetSaved;
-  const detBind = [['detNames','names'],['detCities','cities'],['detCityNames','cityNames'],['detRivers','rivers']];
+  const detBind = [['detNames','names'],['detCities','cities'],['detCityNames','cityNames'],['detRivers','rivers'],['detTrad','trad']];
   for(const [id, prop] of detBind){
     $(id).addEventListener('change', e => {
       S.det[prop] = e.target.checked;
@@ -5172,6 +5259,7 @@ function applyStateToUI(){
   $('detCities').checked = !!S.det.cities;
   $('detCityNames').checked = !!S.det.cityNames;
   $('detRivers').checked = !!S.det.rivers;
+  $('detTrad').checked = !!S.det.trad;
   $('detLabelSize').value = S.det.labelSize || 1.2;
   $('lookOn').checked = !!S.look.on;
   $('lookGlow').value = S.look.glow;
