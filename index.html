@@ -234,9 +234,8 @@
       <div class="group">
         <div class="gHd">Campaign map style</div>
         <div class="row"><label for="lookOn">Campaign map style</label><input type="checkbox" class="sw" id="lookOn" checked></div>
-        <div class="row stack"><label for="lookStrength">Colour richness</label><input type="range" id="lookStrength" min="0" max="1" step="0.05" value="0.7"></div>
         <div class="row stack"><label for="lookGlow">Border shading</label><input type="range" id="lookGlow" min="0" max="1" step="0.05" value="0.6"></div>
-        <div class="hint">Bold territory colours with thin dark borders, a pale icy sea, red-square cities, serif names and a gold-framed year. Only changes how the map is drawn — no extra API calls.</div>
+        <div class="hint">Warm old-map colours, thin dark borders, a pale icy sea, red-square cities, serif names and a gold-framed year. Only changes how the map is drawn — no extra API calls.</div>
       </div>
 
       <div class="group">
@@ -244,6 +243,7 @@
         <div class="row"><label for="detNames">Country names</label><input type="checkbox" class="sw" id="detNames" checked></div>
         <div class="row"><label for="detCities">City dots</label><input type="checkbox" class="sw" id="detCities" checked></div>
         <div class="row"><label for="detCityNames">City names</label><input type="checkbox" class="sw" id="detCityNames" checked></div>
+        <div class="row"><label for="detRivers">River names</label><input type="checkbox" class="sw" id="detRivers"></div>
         <div class="row stack"><label for="detLabelSize">Name size</label><input type="range" id="detLabelSize" min="0.6" max="2.2" step="0.05" value="1.2"></div>
       </div>
 
@@ -2418,7 +2418,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 14;
+const APP_VERSION = 15;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2468,7 +2468,7 @@ const S = {
   preview: 'fit',
   safe: false,
   look: { on:true, strength:0.7, glow:0.6, paper:0 },   // campaign-map style
-  det: { terrain:false, names:true, cities:true, cityNames:true, labelSize:1.2,
+  det: { terrain:false, rivers:false, names:true, cities:true, cityNames:true, labelSize:1.2,
          only:false, chosen:[], phersuKey:null },
   saveData: true,        // keep every style/tile we download, reuse it for free
   offline: false         // never touch the API; only use what is already saved
@@ -2800,6 +2800,18 @@ function textFieldKey(tf){
   }
   return null;
 }
+/* A name layer whose data is mostly lines labels rivers, canals or roads. */
+function isRiverLayer(nl){ return nl.lineCount > 0 && nl.lineCount >= nl.otherCount; }
+let riverShown = {};
+function applyRiverLabels(){
+  if(!map) return;
+  for(const nl of nameLayers){
+    const want = (isRiverLayer(nl) && S.det.rivers) ? 'on' : 'off';
+    if(riverShown[nl.id] === want) continue;
+    riverShown[nl.id] = want;
+    try { map.setPaintProperty(nl.id, 'text-opacity', want === 'on' ? nl.textOpacity : 0); } catch(e){}
+  }
+}
 function nameKeyNow(){ return S.det.phersuKey; }
 function pickNameKey(keys){
   const pref = ['name_en','name','NAME','Name','label','polity','polity_name','title','country','state','entity','realm'];
@@ -2832,6 +2844,7 @@ function decorateStyle(st){
   nameLayers = [];
   allowedNames = new Set();
   dotNames = new Set();
+  riverShown = {};
   for(const L of st.layers){
     if(L.id === 'terrain' || L.type === 'background' || L.type === 'raster') continue;
     L.layout = L.layout || {};
@@ -2843,7 +2856,8 @@ function decorateStyle(st){
     if(L.type === 'symbol' && L.layout['text-field'] !== undefined && L.source){
       // The map repeats names (per tile, along borders and coasts). Keep its name
       // layers invisible, ask them which names they show, and draw one per country.
-      nameLayers.push({ id:L.id, source:L.source, sourceLayer:L['source-layer'] || '',
+      nameLayers.push({ id:L.id, source:L.source, sourceLayer:L['source-layer'] || '', lineCount:0, otherCount:0,
+                        textOpacity: L.paint && L.paint['text-opacity'] !== undefined ? JSON.parse(JSON.stringify(L.paint['text-opacity'])) : 1,
                         key:textFieldKey(L.layout['text-field']),
                         size: typeof L.layout['text-size'] === 'number' ? L.layout['text-size'] : 14 });
       L.layout.visibility = 'visible';
@@ -2883,6 +2897,7 @@ function decorateStyle(st){
 /* Apply the map-detail switches to the live map, layer by layer. */
 function refreshStyle(){
   if(!map) return;
+  riverShown = {};
   let st = null; try { st = map.getStyle(); } catch(e){}
   if(!st || !st.layers){ scheduleLabels(); return; }
   const D = S.det, key = nameKeyNow(), chosen = D.chosen || [];
@@ -2894,7 +2909,8 @@ function refreshStyle(){
     try {
       if(L.type === 'symbol' && layout['text-field'] !== undefined && nameLayers.some(n => n.id === L.id)){
         map.setLayoutProperty(L.id, 'visibility', 'visible');
-        map.setPaintProperty(L.id, 'text-opacity', 0);
+        const nlr = nameLayers.find(n => n.id === L.id);
+        map.setPaintProperty(L.id, 'text-opacity', (nlr && isRiverLayer(nlr) && D.rivers) ? nlr.textOpacity : 0);
         if(layout['icon-image']){
           const io = ((o.dotPaint || []).find(x => x[0] === 'icon-opacity') || [0, 1])[1];
           map.setPaintProperty(L.id, 'icon-opacity', (D.cities && !lookOn()) ? io : 0);
@@ -3090,6 +3106,7 @@ function computeLabels(){
         for(const f of map.queryRenderedFeatures({ layers:nameLayers.map(x => x.id) })){
           const nl = nameLayers.find(x => x.id === (f.layer && f.layer.id));
           if(!nl) continue;
+          if(/Line/.test((f.geometry && f.geometry.type) || '')) continue;     // rivers, canals, roads
           const n = nameOf(f.properties, nl.key || pickNameKey(Object.keys(f.properties || {})));
           if(n && !dotNames.has(n)) allowedNames.add(n);
         }
@@ -3108,6 +3125,9 @@ function computeLabels(){
         try { const sl = map.getLayer(nl.id); ff = sl && sl._featureFilter; } catch(err){}
         const z = map.getZoom();
         for(const f of srcFeats.get(k)){
+          const gt0 = (f.geometry && f.geometry.type) || '';
+          if(/Line/.test(gt0)){ nl.lineCount++; continue; }                     // rivers, canals, roads
+          nl.otherCount++;
           const n = nameOf(f.properties, nl.key || pickNameKey(Object.keys(f.properties || {})));
           if(!n || dotNames.has(n)) continue;
           let pass = true;
@@ -3120,6 +3140,7 @@ function computeLabels(){
         }
       }
       for(const n of dotNames) allowedNames.delete(n);
+      applyRiverLabels();
       // where each name's own label data sits, read from the data itself
       const seenSrc = new Set();
       for(const nl of nameLayers){
@@ -3133,7 +3154,7 @@ function computeLabels(){
           const g = f.geometry || {};
           if(g.type === 'Point'){
             if(!pointAcc.has(n) && onScreen(g.coordinates, cw, ch)) pointAcc.set(n, { ll:g.coordinates.slice(0, 2), size:nl.size });
-          } else if(g.type === 'LineString' || g.type === 'MultiLineString'){
+          } else if(false && (g.type === 'LineString' || g.type === 'MultiLineString')){   // lines are rivers: never country names
             const lines = g.type === 'LineString' ? [g.coordinates] : g.coordinates;
             const en = lineAcc.get(n) || { x:0, y:0, c:0, size:nl.size };
             for(const ln of lines) for(const ll of ln){
@@ -3261,12 +3282,15 @@ function drawLabels(ctx, W, H){
   ctx.fillStyle = 'rgba(255,255,255,0.95)';
   const cities = LABELS.filter(l => l.kind === 'city');
   const dotBoxes = [];
+  const keepClear = overlayReserve(W, H);
   // city names first so a capital is never crowded out by a big country name
   for(const L of cities){
     if(globe && angDist(ctr, L.ll) > 78) continue;
     const p = map.project(L.ll), x = p.x * s, y = p.y * sy;
     if(x < 0 || y < 0 || x > W || y > H) continue;
-    dotBoxes.push({ x: x - 5 * s, y: y - 5 * sy, w: 10 * s, h: 10 * sy });   // country names keep off the dot
+    const db = { x: x - 5 * s, y: y - 5 * sy, w: 10 * s, h: 10 * sy };
+    if(keepClear.some(o => db.x < o.x + o.w && db.x + db.w > o.x && db.y < o.y + o.h && db.y + db.h > o.y)) continue;   // under the year/title
+    dotBoxes.push(db);   // country names keep off the dot
     if(L.dot && lookOn()){
       // campaign style: a small red square with a thin light edge
       const h = 3.4 * s;
@@ -4341,10 +4365,12 @@ const FX = { cloud:null, grain:null, gradeCv:null };
 /* ------------------------------------------------- campaign-map colours
    A warm, faded "old painted map" grade over the map only (not the text):
    sepia warms it, lower saturation fades it, a touch less contrast softens it. */
+const GRADE_STRENGTH = 0.2;        // fixed: the old-map colour setting chosen on the phone
 function gradeParams(){
-  const k = (S.look && S.look.on) ? clamp(+S.look.strength || 0, 0, 1) : 0;
+  const k = (S.look && S.look.on) ? GRADE_STRENGTH : 0;
   // bold, rich campaign-map colours: more saturation and a little contrast, no sepia
-  return { k, sep:0, sat:1 + 0.16 * k, con:1 + 0.07 * k, bri:1 - 0.06 * k };   // richer and a little deeper
+  // gentle warm old-map tint (sepia 0.16, saturation 0.97, contrast 1.01 at the fixed strength)
+  return { k, sep:0.786 * k, sat:1 - 0.143 * k, con:1 + 0.06 * k, bri:1 };
 }
 function gradeCSS(){
   const g = gradeParams();
@@ -4948,7 +4974,7 @@ function wire(){
   $('connectBtn').onclick = connect;
   $('probeBtn').onclick = probeStyles;
   $('resetBtn').onclick = resetSaved;
-  const detBind = [['detNames','names'],['detCities','cities'],['detCityNames','cityNames']];
+  const detBind = [['detNames','names'],['detCities','cities'],['detCityNames','cityNames'],['detRivers','rivers']];
   for(const [id, prop] of detBind){
     $(id).addEventListener('change', e => {
       S.det[prop] = e.target.checked;
@@ -4957,7 +4983,6 @@ function wire(){
   }
   $('lookOn').addEventListener('change', e => { S.look.on = e.target.checked; applyGradeCSS(); refreshStyle(); scheduleLabels(); drawOverlayPreview(); save(); });
   $('lookGlow').addEventListener('input', e => { S.look.glow = +e.target.value; refreshCampaign(); save(); });
-  $('lookStrength').addEventListener('input', e => { S.look.strength = +e.target.value; applyGradeCSS(); save(); });
   $('detLabelSize').addEventListener('input', e => { S.det.labelSize = +e.target.value; drawOverlayPreview(); save(); });
   $('saveData').addEventListener('change', e => { S.saveData = e.target.checked; save(); });
   $('offlineMode').addEventListener('change', e => {
@@ -5080,9 +5105,9 @@ function applyStateToUI(){
   $('detNames').checked = !!S.det.names;
   $('detCities').checked = !!S.det.cities;
   $('detCityNames').checked = !!S.det.cityNames;
+  $('detRivers').checked = !!S.det.rivers;
   $('detLabelSize').value = S.det.labelSize || 1.2;
   $('lookOn').checked = !!S.look.on;
-  $('lookStrength').value = S.look.strength;
   $('lookGlow').value = S.look.glow;
   $('offlineMode').checked = !!S.offline;
   $('styleSlug').value = S.style;
