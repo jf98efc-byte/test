@@ -2420,7 +2420,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 17;
+const APP_VERSION = 18;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2687,6 +2687,14 @@ function addCampaignLayers(st){
    and "Francia" all come out blue. Anything not listed keeps the map's colour. */
 const TRAD_COLOURS = [
   [['Soviet', 'USSR', 'U.S.S.R'], '#b3261e'],
+  [['German Democratic', 'East German', 'GDR', 'DDR'], '#9a4a3c'],          // East Germany
+  [['Federal Republic of Germany', 'West German'], '#4f565e'],              // West Germany
+  [["Democratic People's Republic of Korea", 'North Korea'], '#a33a3a'],
+  [['Republic of Korea', 'South Korea'], '#4f7fbf'],
+  [["People's Republic of China"], '#d8b23c'],
+  [['Republic of China', 'Taiwan', 'Formosa'], '#3f6fb0'],
+  [['Democratic Republic of Vietnam', 'North Vietnam'], '#a8433a'],
+  [['State of Vietnam', 'Republic of Vietnam', 'South Vietnam'], '#d4b24a'],
   [['Holy Roman'], '#5f6b3a'],
   [['Byzantine', 'Eastern Roman'], '#6b2d8f'],
   [['Austro-Hungar', 'Austria-Hungary'], '#ece5d2'],
@@ -2726,14 +2734,14 @@ const TRAD_COLOURS = [
   [['Turkey', 'Turkish', 'Türk'], '#2e6b45'],
   [['Persia', 'Iran', 'Safavid', 'Sasanian', 'Sassanid', 'Achaemenid', 'Parthia'], '#2a9d8f'],
   [['Egypt', 'Mamluk'], '#d6b24a'],
-  [['Arab', 'Saudi', 'Caliphate'], '#a3955a'],
+  [['Saudi', 'Arabia', 'Caliphate', 'Umayyad', 'Abbasid', 'Rashidun'], '#a3955a'],
   [['Rome', 'Roman'], '#7d2a8f'],
   [['Mongol', 'Golden Horde'], '#8a6b3a'],
   [['China', 'Chinese', 'Qing'], '#e2c044'],
   [['Japan'], '#c94a4a'],
   [['Korea'], '#4f7fbf'],
   [['India', 'Mughal', 'Maratha'], '#4f9a5a'],
-  [['United States', 'America', 'USA'], '#3a5fcd'],
+  [['United States of America', 'USA', 'U.S.A'], '#3a5fcd'],
   [['Canada'], '#b8282b'],
   [['Mexic'], '#3f8f4f'],
   [['Brazil'], '#4f9a3a'],
