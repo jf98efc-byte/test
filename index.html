@@ -225,6 +225,13 @@
     <!-- ============================== LOOK ============================= -->
     <section class="tabPane" id="tLook">
       <div class="group">
+        <div class="gHd">Campaign map style</div>
+        <div class="row"><label for="lookOn">Old-map colours</label><input type="checkbox" class="sw" id="lookOn" checked></div>
+        <div class="row stack"><label for="lookStrength">Strength</label><input type="range" id="lookStrength" min="0" max="1" step="0.05" value="0.7"></div>
+        <div class="hint">Warms and fades the map like an old painted map, with brown hills instead of grey. Only changes how it's drawn — no extra API calls.</div>
+      </div>
+
+      <div class="group">
         <div class="gHd">Map details</div>
         <div class="row"><label for="detNames">Country names</label><input type="checkbox" class="sw" id="detNames" checked></div>
         <div class="row"><label for="detCities">City dots</label><input type="checkbox" class="sw" id="detCities" checked></div>
@@ -2400,7 +2407,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 11;
+const APP_VERSION = 12;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2449,6 +2456,7 @@ const S = {
         grain:0.3, vignette:0.35, glow:true },
   preview: 'fit',
   safe: false,
+  look: { on:true, strength:0.7 },   // campaign-map colour grade
   det: { terrain:false, names:true, cities:true, cityNames:true, labelSize:1.2,
          only:false, chosen:[], phersuKey:null },
   saveData: true,        // keep every style/tile we download, reuse it for free
@@ -4092,7 +4100,73 @@ function toHex(c){
    All decorative, all procedural, all drawn in 2D over the map. Deliberately
    NOT pretending to be terrain: soft cloud cover, paper grain and a vignette.
    Everything is a pure function of clip time so export stays deterministic. */
-const FX = { cloud:null, grain:null };
+const FX = { cloud:null, grain:null, gradeCv:null };
+
+/* ------------------------------------------------- campaign-map colours
+   A warm, faded "old painted map" grade over the map only (not the text):
+   sepia warms it, lower saturation fades it, a touch less contrast softens it. */
+function gradeParams(){
+  const k = (S.look && S.look.on) ? clamp(+S.look.strength || 0, 0, 1) : 0;
+  // at the default strength (0.7): sepia 0.55, saturation 0.9, contrast 0.95, brightness 1.03
+  return { k, sep:0.786 * k, sat:1 - 0.143 * k, con:1 - 0.0714 * k, bri:1 + 0.043 * k };
+}
+function gradeCSS(){
+  const g = gradeParams();
+  return g.k ? `sepia(${g.sep}) saturate(${g.sat}) contrast(${g.con}) brightness(${g.bri})` : 'none';
+}
+function applyGradeCSS(){
+  // the map picture only — not the zoom buttons, names or year
+  const c = map && map.getCanvas && map.getCanvas();
+  if(c) c.style.filter = gradeCSS();
+}
+let canvasFilterOK = null;
+function canvasFilterSupported(){
+  if(canvasFilterOK !== null) return canvasFilterOK;
+  try {
+    const c = document.createElement('canvas'); c.width = c.height = 1;
+    const x = c.getContext('2d');
+    x.filter = 'sepia(1)'; x.fillStyle = '#0000ff'; x.fillRect(0, 0, 1, 1);
+    canvasFilterOK = x.getImageData(0, 0, 1, 1).data[0] > 20;   // blue turned brownish = it works
+  } catch(e){ canvasFilterOK = false; }
+  return canvasFilterOK;
+}
+/* The same grade worked out by hand (CSS filter maths), for browsers whose
+   canvas can't do filters. */
+function gradeMatrix(){
+  const g = gradeParams(), a = 1 - g.sep, s = g.sat;
+  const sep = [[0.393 + 0.607 * a, 0.769 - 0.769 * a, 0.189 - 0.189 * a],
+               [0.349 - 0.349 * a, 0.686 + 0.314 * a, 0.168 - 0.168 * a],
+               [0.272 - 0.272 * a, 0.534 - 0.534 * a, 0.131 + 0.869 * a]];
+  const sat = [[0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s],
+               [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s],
+               [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s]];
+  const m = [[0,0,0],[0,0,0],[0,0,0]];
+  for(let i = 0; i < 3; i++) for(let j = 0; j < 3; j++)
+    for(let k = 0; k < 3; k++) m[i][j] += sat[i][k] * sep[k][j];
+  return { m, con:g.con, bri:g.bri };
+}
+function gradeFrame(ctx, cv, W, H){
+  if(!gradeParams().k) return;
+  if(canvasFilterSupported()){
+    if(!FX.gradeCv || FX.gradeCv.width !== W || FX.gradeCv.height !== H){
+      FX.gradeCv = document.createElement('canvas'); FX.gradeCv.width = W; FX.gradeCv.height = H;
+    }
+    const g = FX.gradeCv.getContext('2d');
+    g.filter = 'none'; g.clearRect(0, 0, W, H); g.drawImage(cv, 0, 0);
+    ctx.save(); ctx.filter = gradeCSS(); ctx.drawImage(FX.gradeCv, 0, 0); ctx.restore();
+    return;
+  }
+  const { m, con, bri } = gradeMatrix();
+  const img = ctx.getImageData(0, 0, W, H), d = img.data;
+  const off = 0.5 * (1 - con) * 255;
+  for(let i = 0; i < d.length; i += 4){
+    const r = d[i], gg = d[i + 1], b = d[i + 2];
+    d[i]     = ((m[0][0] * r + m[0][1] * gg + m[0][2] * b) * con + off) * bri;
+    d[i + 1] = ((m[1][0] * r + m[1][1] * gg + m[1][2] * b) * con + off) * bri;
+    d[i + 2] = ((m[2][0] * r + m[2][1] * gg + m[2][2] * b) * con + off) * bri;
+  }
+  ctx.putImageData(img, 0, 0);
+}
 
 function buildCloudTexture(){
   const W = 512, H = 512;
@@ -4516,6 +4590,7 @@ async function exportVideo(){
       ctx.fillStyle = S.bg;
       ctx.fillRect(0, 0, W, H);
       ctx.drawImage(mapCv, 0, 0, W, H);
+      gradeFrame(ctx, cv, W, H);
       if(f % 10 === 0) computeLabels();
       drawLabels(ctx, W, H);
       drawAtmosphere(ctx, W, H, t);
@@ -4593,6 +4668,8 @@ function wire(){
       save(); refreshStyle();
     });
   }
+  $('lookOn').addEventListener('change', e => { S.look.on = e.target.checked; applyGradeCSS(); save(); });
+  $('lookStrength').addEventListener('input', e => { S.look.strength = +e.target.value; applyGradeCSS(); save(); });
   $('detLabelSize').addEventListener('input', e => { S.det.labelSize = +e.target.value; drawOverlayPreview(); save(); });
   $('saveData').addEventListener('change', e => { S.saveData = e.target.checked; save(); });
   $('offlineMode').addEventListener('change', e => {
@@ -4715,6 +4792,8 @@ function applyStateToUI(){
   $('detCities').checked = !!S.det.cities;
   $('detCityNames').checked = !!S.det.cityNames;
   $('detLabelSize').value = S.det.labelSize || 1.2;
+  $('lookOn').checked = !!S.look.on;
+  $('lookStrength').value = S.look.strength;
   $('offlineMode').checked = !!S.offline;
   $('styleSlug').value = S.style;
   $('yearSlider').value = S.year; $('yearInput').value = S.year;
@@ -4788,7 +4867,8 @@ save = function(){
       overlay: Object.assign(S.overlay, saved.overlay || {}),
       exp: Object.assign(S.exp, saved.exp || {}),
       fx: Object.assign(S.fx, saved.fx || {}),
-      det: Object.assign(S.det, saved.det || {})
+      det: Object.assign(S.det, saved.det || {}),
+      look: Object.assign(S.look, saved.look || {})
     });
   }
   // Old builds defaulted to a fast spin; move anyone still on it to very slow.
@@ -4828,6 +4908,7 @@ save = function(){
   try { if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e){}
   paintCacheNote();
   if($('appVersion')) $('appVersion').textContent = 'Version ' + APP_VERSION;
+  applyGradeCSS();
   if(S.mode === 'raw' && S.key) setTimeout(connect, 300);
   else if(S.mode === 'style' && S.key && S.styleURL && S.saveData && await styleIsSaved()){
     // A saved copy costs nothing, so a refresh can reconnect on its own.
