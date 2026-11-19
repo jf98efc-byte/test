@@ -2421,7 +2421,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 22;
+const APP_VERSION = 23;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2693,7 +2693,7 @@ function addCampaignLayers(st){
    and "Francia" all come out blue. Anything not listed keeps the map's colour. */
 const TRAD_COLOURS = [
   [['Soviet', 'USSR', 'U.S.S.R'], '#b3261e'],
-  [['German Democratic', 'East German', 'GDR', 'DDR'], '#9a4a3c'],          // East Germany
+  [['German Democratic', 'Democratic Republic of Germany', 'East German', 'GDR', 'DDR'], '#9a4a3c'],   // East Germany
   [['Federal Republic of Germany', 'West German'], '#4f565e'],              // West Germany
   [["Democratic People's Republic of Korea", 'North Korea'], '#a33a3a'],
   [['Republic of Korea', 'South Korea'], '#4f7fbf'],
@@ -2811,13 +2811,15 @@ function ringAreaDeg(ring){
   }
   return Math.abs(a) / 2;
 }
+const tradObs = new Map();            // year -> Map(name -> { c: original colour, rule, area })
 function computeTradGroups(){
   if(!map || !S.det.trad) return;
   const key = tradKey();
   if(!key) return;
   let st = null; try { st = map.getStyle(); } catch(e){}
   if(!st) return;
-  const votes = new Map(), nameColour = new Map();
+  if(!tradObs.has(S.year)) tradObs.set(S.year, new Map());
+  const obs = tradObs.get(S.year), passArea = new Map();
   for(const L of (st.layers || [])){
     if(L.type !== 'fill' || L.id.startsWith(CMP) || L.id === 'terrain' || isWaterLayer(L)) continue;
     let feats = [];
@@ -2825,27 +2827,34 @@ function computeTradGroups(){
     for(const f of feats){
       const n = nameOf(f.properties, key);
       if(!n) continue;
-      const c = origFillColourOf(L.id, f);
-      if(!c) continue;
-      if(!nameColour.has(n)) nameColour.set(n, c);
-      const rule = tradRuleColour(n);
-      if(!rule) continue;
+      if(!obs.has(n)){
+        const c = origFillColourOf(L.id, f);
+        if(!c) continue;
+        obs.set(n, { c, rule:tradRuleColour(n), area:0 });
+      }
       const g = f.geometry || {};
       const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
-      let area = 0; for(const poly of polys) if(poly && poly[0]) area += ringAreaDeg(poly[0]);
-      const vm = votes.get(c) || new Map();
-      vm.set(rule, (vm.get(rule) || 0) + Math.max(area, 0.0001) * (EMPIRE_COLOURS.has(rule) ? 1000 : 1));
-      votes.set(c, vm);
+      let a = 0; for(const poly of polys) if(poly && poly[0]) a += ringAreaDeg(poly[0]);
+      passArea.set(n, (passArea.get(n) || 0) + a);
     }
   }
-  for(const [n, c] of nameColour){
-    const vm = votes.get(c);
-    if(!vm) continue;
-    let best = null, bw = -1;
-    for(const [col, w] of vm) if(w > bw){ bw = w; best = col; }
-    if(best) tradByName.set(n, best);
+  // what we've seen only ever grows, so the answer settles instead of changing with the view
+  for(const [n, a] of passArea){ const o = obs.get(n); if(o) o.area = Math.max(o.area, a); }
+  const best = new Map();
+  for(const o of obs.values()){
+    if(!o.rule) continue;
+    const w = Math.max(o.area, 0.0001) * (EMPIRE_COLOURS.has(o.rule) ? 1000 : 1);
+    const b = best.get(o.c);
+    if(!b || w > b.w) best.set(o.c, { rule:o.rule, w });
   }
-  const sig = Array.from(tradByName).map(x => x.join('=')).sort().join('|');
+  const next = new Map();
+  for(const [n, o] of obs){
+    if(o.rule) continue;                       // has its own classic colour: keeps it
+    const b = best.get(o.c);
+    if(b) next.set(n, b.rule);
+  }
+  tradByName = next;
+  const sig = S.year + '#' + Array.from(next).map(x => x.join('=')).sort().join('|');
   if(sig !== tradSig){ tradSig = sig; refreshCampaign(); }
 }
 /* The colour expression for the traditional-colours layer. */
@@ -3435,7 +3444,10 @@ function computeLabels(){
       // best of all: the country's own coloured shape, matched by its name
       for(const f of fillFeats){
         let n = null;
-        for(const [kk, v] of Object.entries(f.properties || {})) if(typeof v === 'string' && allowedNames.has(v)){
+        const pk = pickNameKey(Object.keys(f.properties || {}));
+        const entries = Object.entries(f.properties || {});
+        if(pk) entries.sort((a, b) => (b[0] === pk) - (a[0] === pk));        // the usual name property first
+        for(const [kk, v] of entries) if(typeof v === 'string' && allowedNames.has(v)){
           n = v;
           if(S.det.fillNameKey !== kk){
             S.det.fillNameKey = kk; save();
