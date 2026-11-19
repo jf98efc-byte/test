@@ -341,10 +341,6 @@
         <button id="clearCacheBtn" class="wide">Clear saved maps</button>
       </div>
 
-      <div class="group">
-        <div class="row"><label for="maxZoom">Max zoom</label><input type="number" id="maxZoom" value="10" min="1" max="14" inputmode="numeric"></div>
-      </div>
-
       <details class="group adv">
         <summary>Advanced connection settings</summary>
         <div class="row" style="margin-top:12px;"><label for="modeSel">Tile route</label>
@@ -380,6 +376,8 @@
           <input type="text" readonly value="python3 -m http.server 8080">
           <input type="text" readonly value="npx serve -l 8080" style="margin-top:4px;">
         </div>
+        <div class="row" style="margin-top:12px;"><label for="maxZoom">Max zoom</label><input type="number" id="maxZoom" value="10" min="1" max="22" inputmode="numeric"></div>
+        <div class="hint" id="zoomNote">Set to Phersu’s limit automatically when the map loads.</div>
         <button id="resetBtn" class="wide danger">Reset all settings</button>
       </details>
     </section>
@@ -3079,7 +3077,7 @@ async function connectStyleEndpoint(){
     $('layerNote').textContent = 'Phersu’s own styling is in charge. Layer controls do not apply on this route.';
     renderLayerUI();
     applyProjection();
-    try { map.setMaxZoom(S.maxZoom); } catch(e){}
+    applyPhersuZoomLimit(res.style);
     setStatus(res.cached ? 'Map loaded from this device — no API call used.'
                          : 'Map loaded and saved on this device for next time.');
     playEntrance();
@@ -3093,6 +3091,35 @@ async function connectStyleEndpoint(){
   } finally {
     suppressYearReload = false;
   }
+}
+
+/* Phersu's own zoom limit, read from the style it sends (inline maxzoom, or
+   the TileJSON a source points to — already saved, so reading it is free). */
+async function applyPhersuZoomLimit(style){
+  let lim = null;
+  for(const src of Object.values((style && style.sources) || {})){
+    if(typeof src.maxzoom === 'number') lim = Math.max(lim || 0, src.maxzoom);
+    else if(typeof src.url === 'string'){
+      try {
+        const real = src.url.replace(/^pcache:\/\//, '');
+        const r = await cachedBytes(real);
+        if(r.status === 200){
+          const tj = JSON.parse(new TextDecoder().decode(r.buf));
+          if(typeof tj.maxzoom === 'number') lim = Math.max(lim || 0, tj.maxzoom);
+        }
+      } catch(e){ /* unknown: keep the current limit */ }
+    }
+  }
+  if(lim !== null){
+    S.maxZoom = clamp(Math.round(lim), 1, 22);
+    $('maxZoom').value = S.maxZoom;
+    save();
+  }
+  try { map.setMaxZoom(S.maxZoom); } catch(e){}
+  const n = $('zoomNote');
+  if(n) n.textContent = lim !== null
+    ? 'Set to Phersu’s limit (' + S.maxZoom + ') automatically when the map loads.'
+    : 'Phersu didn’t report a limit, so ' + S.maxZoom + ' is used.';
 }
 
 /* Which years does this key actually serve? Probed against the free tile
@@ -4004,7 +4031,7 @@ function wire(){
     save();
   });
   $('maxZoom').addEventListener('change', e => {
-    S.maxZoom = clamp(+e.target.value || 10, 1, 14);
+    S.maxZoom = clamp(+e.target.value || 10, 1, 22);
     if(map) map.setMaxZoom(S.maxZoom);
     // Connected to Phersu's own style: its sources live in the server style,
     // and buildStyle() only returns a background for that format, so
