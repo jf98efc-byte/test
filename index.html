@@ -26,6 +26,7 @@
     background-size:24px 24px;background-position:0 0,0 12px,12px -12px,-12px 0;}
   #map{position:absolute;inset:0;}
   #overlayCv{position:absolute;inset:0;pointer-events:none;}
+  #paperCv{position:absolute;inset:0;pointer-events:none;mix-blend-mode:multiply;}
   #safeGuides{position:absolute;inset:0;pointer-events:none;display:none;}
   #safeGuides div{position:absolute;left:0;right:0;background:rgba(255,80,80,.10);border-top:1px dashed rgba(255,120,120,.55);border-bottom:1px dashed rgba(255,120,120,.55);}
   #panel{width:330px;background:#12151d;border-left:1px solid #262b38;padding:16px;display:flex;flex-direction:column;gap:14px;overflow-y:auto;}
@@ -174,6 +175,7 @@
     <div id="stageWrap">
       <div id="stage">
         <div id="map"></div>
+        <canvas id="paperCv"></canvas>
         <canvas id="overlayCv"></canvas>
         <div id="safeGuides"><div id="guideTop"></div><div id="guideBot"></div></div>
       </div>
@@ -226,9 +228,11 @@
     <section class="tabPane" id="tLook">
       <div class="group">
         <div class="gHd">Campaign map style</div>
-        <div class="row"><label for="lookOn">Old-map colours</label><input type="checkbox" class="sw" id="lookOn" checked></div>
-        <div class="row stack"><label for="lookStrength">Strength</label><input type="range" id="lookStrength" min="0" max="1" step="0.05" value="0.7"></div>
-        <div class="hint">Warms and fades the map like an old painted map, with brown hills instead of grey. Only changes how it's drawn — no extra API calls.</div>
+        <div class="row"><label for="lookOn">Campaign map style</label><input type="checkbox" class="sw" id="lookOn" checked></div>
+        <div class="row stack"><label for="lookStrength">Old-map colours</label><input type="range" id="lookStrength" min="0" max="1" step="0.05" value="0.7"></div>
+        <div class="row stack"><label for="lookGlow">Border glow</label><input type="range" id="lookGlow" min="0" max="1" step="0.05" value="0.6"></div>
+        <div class="row stack"><label for="lookPaper">Paper texture</label><input type="range" id="lookPaper" min="0" max="1" step="0.05" value="0.5"></div>
+        <div class="hint">Warm old-map colours, see-through territories with glowing borders, a soft coastal band and a parchment finish. Only changes how the map is drawn — no extra API calls.</div>
       </div>
 
       <div class="group">
@@ -2407,7 +2411,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 12;
+const APP_VERSION = 13;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2456,7 +2460,7 @@ const S = {
         grain:0.3, vignette:0.35, glow:true },
   preview: 'fit',
   safe: false,
-  look: { on:true, strength:0.7 },   // campaign-map colour grade
+  look: { on:true, strength:0.7, glow:0.6, paper:0.5 },   // campaign-map style
   det: { terrain:false, names:true, cities:true, cityNames:true, labelSize:1.2,
          only:false, chosen:[], phersuKey:null },
   saveData: true,        // keep every style/tile we download, reuse it for free
@@ -2608,6 +2612,175 @@ function dotOpacityProps(L){
   return L.type === 'circle' ? ['circle-opacity', 'circle-stroke-opacity']
        : (L.type === 'symbol' ? ['icon-opacity'] : []);
 }
+/* ---------------------------------------------------- campaign-map style */
+function lookOn(){ return !!(S.look && S.look.on); }
+const CMP = 'cmp-';                                   // layers we add ourselves
+function isWaterLayer(L){ return /water|ocean|sea\b|seas|lake|marine|bathy/i.test(L.id + ' ' + (L['source-layer'] || '')); }
+const SEA_COLOR = '#4f7179', COAST_COLOR = '#93aea9';
+function territoryOpacity(o){
+  // lighter, see-through fills so the land shows through
+  const f = lookOn() ? 0.85 : 1;
+  if(o === undefined) return f;
+  if(typeof o === 'number') return o * f;
+  if(JSON.stringify(o).includes('zoom')) return o;           // zoom curves can't be scaled
+  return f === 1 ? o : ['*', o, f];
+}
+function glowPaint(){
+  const g = lookOn() ? clamp(+S.look.glow || 0, 0, 1) : 0;
+  return { show: g > 0.01, width: 3 + 10 * g, blur: 2 + 8 * g, offset: (3 + 10 * g) / 2, opacity: 0.35 + 0.45 * g };
+}
+/* Add the coloured edge + inner glow for each territory, and a light coastal
+   band inside each sea. They copy the source, filter and colour of the layer
+   they belong to, and are switched on/off with the style. */
+function addCampaignLayers(st){
+  const out = [];
+  const g = glowPaint();
+  for(const L of st.layers){
+    out.push(L);
+    if(L.type !== 'fill' || L.id.startsWith(CMP) || L.id === 'terrain') continue;
+    const base = { source:L.source };
+    if(L['source-layer']) base['source-layer'] = L['source-layer'];
+    if(L.filter) base.filter = JSON.parse(JSON.stringify(L.filter));
+    if(L.minzoom !== undefined) base.minzoom = L.minzoom;
+    if(L.maxzoom !== undefined) base.maxzoom = L.maxzoom;
+    const vis = g.show ? 'visible' : 'none';
+    if(isWaterLayer(L)){
+      out.push(Object.assign({ id:CMP + 'coast-' + L.id, type:'line',
+        layout:{ 'line-join':'round', visibility:vis },
+        paint:{ 'line-color':COAST_COLOR, 'line-width':g.width * 1.3, 'line-blur':g.blur * 1.3,
+                'line-offset':g.offset * 1.3, 'line-opacity':0.4 } }, JSON.parse(JSON.stringify(base))));
+      continue;
+    }
+    const fc = (L.paint && L.paint['fill-color'] !== undefined) ? JSON.parse(JSON.stringify(L.paint['fill-color'])) : '#000000';
+    out.push(Object.assign({ id:CMP + 'glow-' + L.id, type:'line',
+      layout:{ 'line-join':'round', visibility:vis },
+      paint:{ 'line-color':fc, 'line-width':g.width, 'line-blur':g.blur, 'line-offset':g.offset, 'line-opacity':g.opacity } },
+      JSON.parse(JSON.stringify(base))));
+    out.push(Object.assign({ id:CMP + 'edge-' + L.id, type:'line',
+      layout:{ 'line-join':'round', visibility: lookOn() ? 'visible' : 'none' },
+      paint:{ 'line-color':fc, 'line-width':1.6, 'line-opacity':0.95 } },
+      JSON.parse(JSON.stringify(base))));
+  }
+  st.layers = out;
+  return st;
+}
+/* Live update of everything the campaign style changes, without a reload. */
+function refreshCampaign(){
+  if(!map) return;
+  let st = null; try { st = map.getStyle(); } catch(e){}
+  if(!st || !st.layers) return;
+  const g = glowPaint();
+  for(const L of st.layers){
+    try {
+      if(L.id.startsWith(CMP + 'glow-')){
+        map.setLayoutProperty(L.id, 'visibility', g.show ? 'visible' : 'none');
+        map.setPaintProperty(L.id, 'line-width', g.width);
+        map.setPaintProperty(L.id, 'line-blur', g.blur);
+        map.setPaintProperty(L.id, 'line-offset', g.offset);
+        map.setPaintProperty(L.id, 'line-opacity', g.opacity);
+      } else if(L.id.startsWith(CMP + 'coast-')){
+        map.setLayoutProperty(L.id, 'visibility', g.show ? 'visible' : 'none');
+        map.setPaintProperty(L.id, 'line-width', g.width * 1.3);
+        map.setPaintProperty(L.id, 'line-blur', g.blur * 1.3);
+        map.setPaintProperty(L.id, 'line-offset', g.offset * 1.3);
+      } else if(L.id.startsWith(CMP + 'edge-')){
+        map.setLayoutProperty(L.id, 'visibility', lookOn() ? 'visible' : 'none');
+      } else if(L.type === 'fill' && origLayer[L.id]){
+        const o = origLayer[L.id];
+        if(isWaterLayer(L)){
+          map.setPaintProperty(L.id, 'fill-color', lookOn() ? SEA_COLOR : (o.fillColor !== undefined ? o.fillColor : '#000000'));
+        } else if(!pickChoosing){
+          map.setPaintProperty(L.id, 'fill-opacity', territoryOpacity(o.opacity));
+        }
+      }
+    } catch(e){ console.warn('campaign', L.id, e); }
+  }
+  map.triggerRepaint();
+}
+
+/* Parchment: soft blotches, fine fibres and grain, made once in code. */
+function buildPaperTexture(){
+  const N = 768, c = document.createElement('canvas'); c.width = c.height = N;
+  const x = c.getContext('2d');
+  // value noise, a few octaves
+  const rnd = (() => { let s = 1234567; return () => (s = (s * 16807) % 2147483647) / 2147483647; })();
+  const grid = (n) => { const a = new Float32Array((n + 1) * (n + 1)); for(let i = 0; i < a.length; i++) a[i] = rnd(); return a; };
+  const octs = [[4, 0.5], [9, 0.25], [22, 0.15], [70, 0.10]].map(([n, w]) => ({ n, w, g:grid(n) }));
+  const img = x.createImageData(N, N), d = img.data;
+  for(let y = 0; y < N; y++){
+    for(let xx = 0; xx < N; xx++){
+      let v = 0;
+      for(const o of octs){
+        const fx = xx / N * o.n, fy = y / N * o.n, ix = fx | 0, iy = fy | 0, tx = fx - ix, ty = fy - iy;
+        const sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty), r = o.n + 1;
+        const a = o.g[iy * r + ix], b = o.g[iy * r + ix + 1], cc = o.g[(iy + 1) * r + ix], dd = o.g[(iy + 1) * r + ix + 1];
+        v += o.w * (a + (b - a) * sx + (cc - a) * sy + (a - b - cc + dd) * sx * sy);
+      }
+      v = clamp((v - 0.35) * 1.4, 0, 1) + (rnd() - 0.5) * 0.08;      // blotches + grain
+      const i = (y * N + xx) * 4;
+      d[i]     = 255 - v * 38;
+      d[i + 1] = 255 - v * 52;
+      d[i + 2] = 255 - v * 78;                                       // warm brown, multiply-friendly
+      d[i + 3] = 255;
+    }
+  }
+  x.putImageData(img, 0, 0);
+  // faint fibres
+  x.globalAlpha = 0.05; x.strokeStyle = '#6b4a24'; x.lineWidth = 0.7;
+  for(let k = 0; k < 900; k++){
+    const sx = rnd() * N, sy = rnd() * N, a = rnd() * Math.PI, l = 4 + rnd() * 18;
+    x.beginPath(); x.moveTo(sx, sy); x.lineTo(sx + Math.cos(a) * l, sy + Math.sin(a) * l); x.stroke();
+  }
+  return c;
+}
+/* Paper texture and warm burnt edges, multiplied over the map. */
+function drawPaper(ctx, W, H){
+  if(!lookOn()) return;
+  const pa = clamp(+S.look.paper || 0, 0, 1);
+  if(pa <= 0.01) return;
+  if(!FX.paper) FX.paper = buildPaperTexture();
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.globalAlpha = 0.25 + 0.75 * pa;
+  ctx.drawImage(FX.paper, 0, 0, W, H);
+  ctx.globalAlpha = 1;
+  const base = Math.min(W, H), far = Math.hypot(W, H) / 2;
+  const g = ctx.createRadialGradient(W / 2, H / 2, base * 0.32, W / 2, H / 2, far);
+  g.addColorStop(0, 'rgba(255,255,255,0)');
+  g.addColorStop(1, `rgba(128,88,48,${0.7 * pa})`);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+let paperSize = '';
+function drawPaperPreview(){
+  const cv = $('paperCv'), st = $('stage');
+  if(!cv || !st) return;
+  const w = st.clientWidth, h = st.clientHeight, dpr = window.devicePixelRatio || 1;
+  const key = w + 'x' + h + '|' + (lookOn() ? S.look.paper : 'off');
+  if(key === paperSize) return;
+  paperSize = key;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  // multiply against transparent does nothing here, so paint normally; the
+  // element itself is multiplied onto the map by CSS
+  ctx.save();
+  const pa = lookOn() ? clamp(+S.look.paper || 0, 0, 1) : 0;
+  if(pa > 0.01){
+    if(!FX.paper) FX.paper = buildPaperTexture();
+    ctx.globalAlpha = 0.25 + 0.75 * pa;
+    ctx.drawImage(FX.paper, 0, 0, cv.width, cv.height);
+    ctx.globalAlpha = 1;
+    const W = cv.width, H = cv.height, base = Math.min(W, H), far = Math.hypot(W, H) / 2;
+    const g = ctx.createRadialGradient(W / 2, H / 2, base * 0.32, W / 2, H / 2, far);
+    g.addColorStop(0, 'rgba(255,255,255,0)');
+    g.addColorStop(1, `rgba(128,88,48,${0.7 * pa})`);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+}
+
 function textFieldKey(tf){
   if(typeof tf === 'string'){ const m = tf.match(/\{([^}]+)\}/); return m ? m[1] : null; }
   if(Array.isArray(tf)){
@@ -2654,6 +2827,7 @@ function decorateStyle(st){
     origLayer[L.id] = { filter: L.filter ? JSON.parse(JSON.stringify(L.filter)) : null,
                         opacity: L.paint && L.paint['fill-opacity'] !== undefined ? JSON.parse(JSON.stringify(L.paint['fill-opacity'])) : undefined,
                         visibility: L.layout.visibility || 'visible',
+                        fillColor: L.paint && L.paint['fill-color'] !== undefined ? JSON.parse(JSON.stringify(L.paint['fill-color'])) : undefined,
                         dotPaint: dotOpacityProps(L).map(k => [k, L.paint && L.paint[k] !== undefined ? JSON.parse(JSON.stringify(L.paint[k])) : 1]) };
     if(L.type === 'symbol' && L.layout['text-field'] !== undefined && L.source){
       // The map repeats names (per tile, along borders and coasts). Keep its name
@@ -2687,10 +2861,15 @@ function decorateStyle(st){
       L.paint['fill-opacity'] = ['case', inExpr(key, chosen.length ? chosen : ['\u0000']), base, 0.18];
     }
   }
-  return st;
+  for(const L of st.layers){
+    if(L.type !== 'fill' || L.id === 'terrain' || !origLayer[L.id]) continue;
+    L.paint = L.paint || {};
+    if(isWaterLayer(L)){ if(lookOn()) L.paint['fill-color'] = SEA_COLOR; }
+    else if(!pickChoosing) L.paint['fill-opacity'] = territoryOpacity(origLayer[L.id].opacity);
+  }
+  return addCampaignLayers(st);
 }
-/* Apply the map-detail switches to the live map, layer by layer. Rebuilding the
-   whole style for a toggle stalled the redraw, and this is quicker anyway. */
+/* Apply the map-detail switches to the live map, layer by layer. */
 function refreshStyle(){
   if(!map) return;
   let st = null; try { st = map.getStyle(); } catch(e){}
@@ -2698,7 +2877,7 @@ function refreshStyle(){
   const D = S.det, key = nameKeyNow(), chosen = D.chosen || [];
   const hiding = hidingActive();
   for(const L of st.layers){
-    if(L.id === 'terrain' || L.type === 'background' || L.type === 'raster') continue;
+    if(L.id === 'terrain' || L.type === 'background' || L.type === 'raster' || L.id.startsWith(CMP)) continue;
     const o = origLayer[L.id] || { filter:null, opacity:undefined, visibility:'visible' };
     const layout = L.layout || {};
     try {
@@ -2723,8 +2902,8 @@ function refreshStyle(){
       map.setFilter(L.id, (hiding && named) ? chosenFilter(o.filter, key, chosen) : (o.filter || null));
       map.setLayoutProperty(L.id, 'visibility',
         (hiding && L.type === 'line' && lk === null) ? 'none' : o.visibility);
-      if(L.type === 'fill'){
-        let base = o.opacity === undefined ? 1 : o.opacity;
+      if(L.type === 'fill' && !isWaterLayer(L)){
+        let base = territoryOpacity(o.opacity);
         if(pickChoosing && named){
           const b = (typeof base === 'number') ? base : (JSON.stringify(base).includes('zoom') ? 0.9 : base);
           map.setPaintProperty(L.id, 'fill-opacity', ['case', inExpr(key, chosen.length ? chosen : ['\u0000']), b, 0.18]);
@@ -2734,6 +2913,7 @@ function refreshStyle(){
       }
     } catch(e){ console.warn('layer', L.id, e); }
   }
+  refreshCampaign();
   map.triggerRepaint();
   scheduleLabels();
 }
@@ -2744,7 +2924,7 @@ function detectKeys(){
   if(!st) return;
   let changed = false;
   for(const L of st.layers || []){
-    if(!['fill','line','circle','symbol'].includes(L.type) || L.id === 'terrain') continue;
+    if(!['fill','line','circle','symbol'].includes(L.type) || L.id === 'terrain' || L.id.startsWith(CMP)) continue;
     if(layerKey[L.id] !== undefined) continue;
     let feats = [];
     try { feats = map.queryRenderedFeatures({ layers:[L.id] }); } catch(e){}
@@ -2796,7 +2976,7 @@ function pointInPoly(pt, pts){
 function fillLayerIds(){
   let st = null; try { st = map.getStyle(); } catch(e){}
   if(!st) return [];
-  return (st.layers || []).filter(L => L.type === 'fill' && L.id !== 'terrain').map(L => L.id);
+  return (st.layers || []).filter(L => L.type === 'fill' && L.id !== 'terrain' && !isWaterLayer(L)).map(L => L.id);
 }
 function dotLayerIds(){
   let st = null; try { st = map.getStyle(); } catch(e){}
@@ -3066,8 +3246,8 @@ function drawLabels(ctx, W, H){
   ctx.save();
   ctx.textBaseline = 'middle';
   ctx.lineJoin = 'round';
-  ctx.strokeStyle = 'rgba(18,14,8,0.6)';
-  ctx.fillStyle = 'rgba(255,255,255,0.95)';
+  ctx.strokeStyle = lookOn() ? 'rgba(46,28,12,0.55)' : 'rgba(18,14,8,0.6)';
+  ctx.fillStyle = lookOn() ? 'rgba(246,236,212,0.97)' : 'rgba(255,255,255,0.95)';
   const cities = LABELS.filter(l => l.kind === 'city');
   const dotBoxes = [];
   // city names first so a capital is never crowded out by a big country name
@@ -4107,8 +4287,8 @@ const FX = { cloud:null, grain:null, gradeCv:null };
    sepia warms it, lower saturation fades it, a touch less contrast softens it. */
 function gradeParams(){
   const k = (S.look && S.look.on) ? clamp(+S.look.strength || 0, 0, 1) : 0;
-  // at the default strength (0.7): sepia 0.55, saturation 0.9, contrast 0.95, brightness 1.03
-  return { k, sep:0.786 * k, sat:1 - 0.143 * k, con:1 - 0.0714 * k, bri:1 + 0.043 * k };
+  // at the default strength (0.7): sepia 0.55, saturation 0.9, a touch more contrast (no haze)
+  return { k, sep:0.786 * k, sat:1 - 0.143 * k, con:1 + 0.06 * k, bri:1 };
 }
 function gradeCSS(){
   const g = gradeParams();
@@ -4369,6 +4549,7 @@ function drawOverlayPreview(){
   cv.style.width = w + 'px'; cv.style.height = h + 'px';
   const ctx = cv.getContext('2d');
   ctx.clearRect(0, 0, cv.width, cv.height);
+  drawPaperPreview();
   drawLabels(ctx, cv.width, cv.height);
   drawAtmosphere(ctx, cv.width, cv.height, previewClock());
   drawOverlay(ctx, cv.width, cv.height, S.year);
@@ -4591,6 +4772,7 @@ async function exportVideo(){
       ctx.fillRect(0, 0, W, H);
       ctx.drawImage(mapCv, 0, 0, W, H);
       gradeFrame(ctx, cv, W, H);
+      drawPaper(ctx, W, H);
       if(f % 10 === 0) computeLabels();
       drawLabels(ctx, W, H);
       drawAtmosphere(ctx, W, H, t);
@@ -4668,7 +4850,9 @@ function wire(){
       save(); refreshStyle();
     });
   }
-  $('lookOn').addEventListener('change', e => { S.look.on = e.target.checked; applyGradeCSS(); save(); });
+  $('lookOn').addEventListener('change', e => { S.look.on = e.target.checked; applyGradeCSS(); refreshStyle(); drawOverlayPreview(); save(); });
+  $('lookGlow').addEventListener('input', e => { S.look.glow = +e.target.value; refreshCampaign(); save(); });
+  $('lookPaper').addEventListener('input', e => { S.look.paper = +e.target.value; drawOverlayPreview(); save(); });
   $('lookStrength').addEventListener('input', e => { S.look.strength = +e.target.value; applyGradeCSS(); save(); });
   $('detLabelSize').addEventListener('input', e => { S.det.labelSize = +e.target.value; drawOverlayPreview(); save(); });
   $('saveData').addEventListener('change', e => { S.saveData = e.target.checked; save(); });
@@ -4794,6 +4978,8 @@ function applyStateToUI(){
   $('detLabelSize').value = S.det.labelSize || 1.2;
   $('lookOn').checked = !!S.look.on;
   $('lookStrength').value = S.look.strength;
+  $('lookGlow').value = S.look.glow;
+  $('lookPaper').value = S.look.paper;
   $('offlineMode').checked = !!S.offline;
   $('styleSlug').value = S.style;
   $('yearSlider').value = S.year; $('yearInput').value = S.year;
