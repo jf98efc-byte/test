@@ -2586,13 +2586,23 @@ let lastServerStyle = null;     // Phersu's style as it arrived, for free re-sty
 let layerKey = {};              // layer id -> name property (null = layer has no names)
 let pickChoosing = false;       // "tap countries on the map" mode
 let origLayer = {};
-let styleHasText = false;       // the map draws its own names (Phersu does)             // layer id -> its filter / fill-opacity as the style defined them
+let styleHasText = false;       // true only for name layers we could NOT read (left as they are)
+let nameLayers = [];            // the map's own name layers we read: we draw one name per country instead
+let allowedNames = new Set();   // names those layers actually show (respects the map's own filters)       // the map draws its own names (Phersu does)             // layer id -> its filter / fill-opacity as the style defined them
 let LABELS = [];
 const knownNames = new Set();
 
 function dotOpacityProps(L){
   return L.type === 'circle' ? ['circle-opacity', 'circle-stroke-opacity']
        : (L.type === 'symbol' ? ['icon-opacity'] : []);
+}
+function textFieldKey(tf){
+  if(typeof tf === 'string'){ const m = tf.match(/\{([^}]+)\}/); return m ? m[1] : null; }
+  if(Array.isArray(tf)){
+    if(tf[0] === 'get' && typeof tf[1] === 'string') return tf[1];
+    for(const x of tf.slice(1)){ const k = textFieldKey(x); if(k) return k; }
+  }
+  return null;
 }
 function nameKeyNow(){ return S.det.phersuKey; }
 function pickNameKey(keys){
@@ -2623,6 +2633,8 @@ function decorateStyle(st){
   const hiding = hidingActive();
   origLayer = {};
   styleHasText = false;
+  nameLayers = [];
+  allowedNames = new Set();
   for(const L of st.layers){
     if(L.id === 'terrain' || L.type === 'background' || L.type === 'raster') continue;
     L.layout = L.layout || {};
@@ -2631,8 +2643,20 @@ function decorateStyle(st){
                         visibility: L.layout.visibility || 'visible',
                         dotPaint: dotOpacityProps(L).map(k => [k, L.paint && L.paint[k] !== undefined ? JSON.parse(JSON.stringify(L.paint[k])) : 1]) };
     if(L.type === 'symbol' && L.layout['text-field'] !== undefined && !L.layout['icon-image']){
-      styleHasText = true;
-      L.layout.visibility = D.names ? 'visible' : 'none';   // the map's own names
+      const k = textFieldKey(L.layout['text-field']);
+      if(k && L.source){
+        // The map labels every tile a country touches, so names repeat. Keep the
+        // layer (invisible) to learn which names it shows, and draw one each ourselves.
+        nameLayers.push({ id:L.id, source:L.source, sourceLayer:L['source-layer'] || '', key:k,
+                          size: typeof L.layout['text-size'] === 'number' ? L.layout['text-size'] : 14 });
+        L.layout.visibility = 'visible';
+        // place every name (invisibly) so asking "which names does it show" isn't cut short by crowding
+        L.layout['text-allow-overlap'] = true; L.layout['text-ignore-placement'] = true;
+        L.paint = L.paint || {}; L.paint['text-opacity'] = 0; L.paint['icon-opacity'] = 0;
+      } else {
+        styleHasText = true;
+        L.layout.visibility = D.names ? 'visible' : 'none';   // couldn't read it: leave the map's own names
+      }
       continue;
     }
     if(L.type === 'circle' || (L.type === 'symbol' && L.layout['icon-image'])){
@@ -2668,7 +2692,9 @@ function refreshStyle(){
     const layout = L.layout || {};
     try {
       if(L.type === 'symbol' && layout['text-field'] !== undefined && !layout['icon-image']){
-        map.setLayoutProperty(L.id, 'visibility', D.names ? 'visible' : 'none'); continue;
+        if(nameLayers.some(n => n.id === L.id)){ map.setLayoutProperty(L.id, 'visibility', 'visible'); map.setPaintProperty(L.id, 'text-opacity', 0); }
+        else map.setLayoutProperty(L.id, 'visibility', D.names ? 'visible' : 'none');
+        continue;
       }
       if(L.type === 'circle' || (L.type === 'symbol' && layout['icon-image'])){
         map.setLayoutProperty(L.id, 'visibility', D.cities ? 'visible' : 'none');
@@ -2792,13 +2818,48 @@ function computeLabels(){
       for(const poly of polys) if(poly && poly[0]) chosenRings.push(poly[0]);
     }
   }
-  if(D.names && !styleHasText){        // only when the map has no names of its own
-    const feats = fillFeats;
-    const acc = new Map();
-    for(const f of feats){
-      const key = nameKeyNow() || pickNameKey(Object.keys(f.properties || {}));
+  // which names the map's own (invisible) name layers show — they follow the map's filters
+  if(nameLayers.length){
+    try {
+      for(const f of map.queryRenderedFeatures({ layers:nameLayers.map(n => n.id) })){
+        const nl = nameLayers.find(n => n.id === (f.layer && f.layer.id));
+        const n = nl && nameOf(f.properties, nl.key);
+        if(n) allowedNames.add(n);
+      }
+    } catch(e){}
+  }
+  const groups = [];
+  if(nameLayers.length){
+    const dotSrc = new Set();
+    try {
+      for(const L of map.getStyle().layers || []) if(dotLayerIds().includes(L.id)) dotSrc.add(L.source + '|' + (L['source-layer'] || ''));
+    } catch(e){}
+    const seenSrc = new Set();
+    for(const nl of nameLayers){
+      const k = nl.source + '|' + nl.sourceLayer;
+      if(seenSrc.has(k)) continue;
+      seenSrc.add(k);
+      let feats = [];
+      try { feats = map.querySourceFeatures(nl.source, nl.sourceLayer ? { sourceLayer:nl.sourceLayer } : {}); } catch(e){}
+      groups.push({ feats, key:nl.key, size:nl.size, cityLayer:dotSrc.has(k) });
+    }
+  } else if(!styleHasText){
+    groups.push({ feats:fillFeats, key:null, size:14, cityLayer:false });
+  }
+  if(D.names && groups.length){
+    const acc = new Map(), pointAcc = new Map();
+    for(const grp of groups)
+    for(const f of grp.feats){
+      const key = grp.key || nameKeyNow() || pickNameKey(Object.keys(f.properties || {}));
       const n = nameOf(f.properties, key);
       if(!n) continue;
+      if(allowedNames.size && !allowedNames.has(n)) continue;
+      if(f.geometry && f.geometry.type === 'Point'){
+        if(grp.cityLayer || pointAcc.has(n)) continue;          // city names are handled with the dots
+        const ll = f.geometry.coordinates.slice(0, 2);
+        if(onScreen(ll, cw, ch)) pointAcc.set(n, { ll, size:grp.size });
+        continue;
+      }
       knownNames.add(n);
       if(hidingNow && !S.det.chosen.includes(n)) continue;
       const g = f.geometry || {};
@@ -2835,10 +2896,16 @@ function computeLabels(){
       const ll = map.unproject(c);
       LABELS.push({ kind:'country', name:n, ll:[ll.lng, ll.lat], area:e.a });
     }
+    // names that come as single points: one each, at the map's own text size
+    for(const [n, pt] of pointAcc){
+      if(acc.has(n)) continue;
+      const side = pt.size / 0.085;
+      LABELS.push({ kind:'country', name:n, ll:pt.ll, area:side * side });
+    }
   }
   if(styleHasText && D.names){
     let st = null; try { st = map.getStyle(); } catch(e){}
-    const textIds = ((st && st.layers) || []).filter(L => L.type === 'symbol' && L.layout && L.layout['text-field'] !== undefined && !L.layout['icon-image']).map(L => L.id);
+    const textIds = ((st && st.layers) || []).filter(L => L.type === 'symbol' && L.layout && L.layout['text-field'] !== undefined && !L.layout['icon-image'] && !nameLayers.some(n => n.id === L.id)).map(L => L.id);
     let feats = [];
     try { if(textIds.length) feats = map.queryRenderedFeatures({ layers:textIds }); } catch(e){}
     for(const f of feats){
@@ -2914,11 +2981,13 @@ function drawLabels(ctx, W, H){
   ctx.strokeStyle = 'rgba(18,14,8,0.6)';
   ctx.fillStyle = 'rgba(255,255,255,0.95)';
   const cities = LABELS.filter(l => l.kind === 'city');
+  const dotBoxes = [];
   // city names first so a capital is never crowded out by a big country name
   for(const L of cities){
     if(globe && angDist(ctr, L.ll) > 78) continue;
     const p = map.project(L.ll), x = p.x * s, y = p.y * sy;
     if(x < 0 || y < 0 || x > W || y > H) continue;
+    dotBoxes.push({ x: x - 5 * s, y: y - 5 * sy, w: 10 * s, h: 10 * sy });   // country names keep off the dot
     if(L.dot){
       ctx.save();
       ctx.beginPath(); ctx.arc(x, y, 3.5 * s, 0, Math.PI * 2);
@@ -2935,6 +3004,7 @@ function drawLabels(ctx, W, H){
     if(!fits(b)) continue;
     trackText(ctx, L.name, x + 4.5 * s, y, fs * 0.04, 'left');
   }
+  for(const b of dotBoxes) boxes.push(b);
   const countries = LABELS.filter(l => l.kind === 'country').sort((a, b) => b.area - a.area);
   for(const L of countries){
     const side = Math.sqrt(L.area);
@@ -2955,13 +3025,16 @@ function drawLabels(ctx, W, H){
     }
     const fs = fsCss * s;
     let placed = null;
+    search:
     for(const dy of [0, -1.4, 1.4, -2.6, 2.6]){
-      const yy = y + dy * fs;
-      if(fits({ x: x - w / 2, y: yy - fs * 0.75, w, h: fs * 1.5 })){ placed = yy; break; }
+      for(const dx of [0, -0.35, 0.35]){
+        const xx = x + dx * w, yy = y + dy * fs;
+        if(fits({ x: xx - w / 2, y: yy - fs * 0.75, w, h: fs * 1.5 })){ placed = [xx, yy]; break search; }
+      }
     }
     if(placed === null) continue;
     ctx.lineWidth = fs * 0.24;
-    trackText(ctx, text, x, placed, fs * 0.14, 'center');
+    trackText(ctx, text, placed[0], placed[1], fs * 0.14, 'center');
   }
   ctx.restore();
 }
