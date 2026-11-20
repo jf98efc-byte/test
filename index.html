@@ -2434,7 +2434,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 28;
+const APP_VERSION = 29;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -3350,14 +3350,15 @@ function computeLabels(){
         if(!ring || ring.length < 3) continue;
         const step = Math.max(1, Math.floor(ring.length / 160));
         const pts = [];
+        const ox = labelAnim ? cw : 0, oy = labelAnim ? ch : 0;   // export: look a screen beyond each edge
         for(let i = 0; i < ring.length; i += step){
           if(globe && angDist(ctr, ring[i]) > 80) continue;
-          const q = map.project(ring[i]); pts.push([q.x, q.y]);
+          const q = map.project(ring[i]); pts.push([q.x + ox, q.y + oy]);
         }
         if(pts.length < 3) continue;
-        const clipped = clipToRect(pts, cw, ch);          // only the part on screen
+        const clipped = clipToRect(pts, cw + 2 * ox, ch + 2 * oy);   // only the part on (or near) screen
         if(clipped.length < 3) continue;
-        pts.length = 0; for(const q of clipped) pts.push(q);
+        pts.length = 0; for(const q of clipped) pts.push([q[0] - ox, q[1] - oy]);
         let a = 0, cx = 0, cy = 0;
         for(let i = 0, j = pts.length - 1; i < pts.length; j = i++){
           const cr = pts[j][0] * pts[i][1] - pts[i][0] * pts[j][1];
@@ -3600,7 +3601,7 @@ function drawLabels(ctx, W, H){
 }
 function drawLabelsNow(ctx, W, H){
   if(!map || (!LABELS.length && !labelAnim)) return;
-  const kA = animK(0.28), kP = animK(0.45);
+  const kA = animK(0.28);
   const stamp = labelAnim ? (labelAnim.stamp = (labelAnim.stamp || 0) + 1) : 0;
   const cont = map.getContainer();
   const s = W / (cont.clientWidth || W);
@@ -3708,67 +3709,86 @@ function drawLabelsNow(ctx, W, H){
     }
     ctx.restore();
   };
-  for(const L of countries){
-    // the anchor and size glide towards each new measurement during an export
-    const st = animState('c|' + L.name, { ll: L.ll.slice(), area: L.area, off: [0, 0] });
-    if(st){
-      st.seen = stamp;
-      st.ll = [st.ll[0] + (L.ll[0] - st.ll[0]) * kP, st.ll[1] + (L.ll[1] - st.ll[1]) * kP];
-      st.area += (L.area - st.area) * kP;
-    }
-    const ll = st ? st.ll : L.ll, area = st ? st.area : L.area;
-    const text = kg ? L.name : L.name.toUpperCase();
-    let placed = null, fs = 0, ax = 0, ay = 0;
+  const ls = S.det.labelSize || 1;
+  // size and width of a country's name, from how big the country is on screen
+  const sizeName = (text, area) => {
     const side = Math.sqrt(area);
-    const visible = side >= 30 && !(globe && angDist(ctr, ll) > 72);
-    if(visible){
-      const p = map.project(ll); ax = p.x * s; ay = p.y * sy;
-      if(ax >= 0 && ay >= 0 && ax <= W && ay <= H){
-        const ls = S.det.labelSize || 1;
-        let fsCss = clamp(side * 0.085, 9, 24) * ls;
-        if(kg) fsCss *= 1.25;                                // these read bigger, like campaign maps
-        ctx.font = `600 ${fsCss * s}px ${fam}`;
-        let w = measureTracked(ctx, text, fsCss * s * trk);
-        const maxW = Math.min(side * 1.5 * s, W * 0.86);     // never wider than the screen
-        if(w > maxW){                                        // shrink long names to fit
-          fsCss = Math.max(8 * ls, fsCss * maxW / w);
-          ctx.font = `600 ${fsCss * s}px ${fam}`;
-          w = measureTracked(ctx, text, fsCss * s * trk);
-        }
-        fs = fsCss * s;
-        search:
-        for(const dy of [0, -1.4, 1.4, -2.6, 2.6]){
-          for(const dx of [0, -0.35, 0.35]){
-            const pad = 6 * s;                                 // keep the whole name on screen
-            const xx = clamp(ax + dx * w, w / 2 + pad, W - w / 2 - pad), yy = clamp(ay + dy * fs, fs, H - fs);
-            if(fits({ x: xx - w / 2, y: yy - fs * 0.75, w, h: fs * 1.5 })){ placed = [xx, yy]; break search; }
-          }
-        }
+    let fsCss = clamp(side * 0.085, 9, 24) * ls;
+    if(kg) fsCss *= 1.25;                                    // these read bigger, like campaign maps
+    ctx.font = `600 ${fsCss * s}px ${fam}`;
+    let w = measureTracked(ctx, text, fsCss * s * trk);
+    const maxW = Math.min(side * 1.5 * s, W * 0.86);         // never wider than the screen
+    if(w > maxW){                                            // shrink long names to fit
+      fsCss = Math.max(8 * ls, fsCss * maxW / w);
+      ctx.font = `600 ${fsCss * s}px ${fam}`;
+      w = measureTracked(ctx, text, fsCss * s * trk);
+    }
+    return { fs: fsCss * s, w };
+  };
+  const SPOTS = [[0, 0], [-0.35, 0], [0.35, 0], [0, -1.4], [-0.35, -1.4], [0.35, -1.4], [0, 1.4], [-0.35, 1.4], [0.35, 1.4],
+                 [0, -2.6], [-0.35, -2.6], [0.35, -2.6], [0, 2.6], [-0.35, 2.6], [0.35, 2.6]];
+  if(!labelAnim){
+    // preview: placed fresh for the current view
+    for(const L of countries){
+      const text = kg ? L.name : L.name.toUpperCase();
+      if(Math.sqrt(L.area) < 30 || (globe && angDist(ctr, L.ll) > 72)) continue;
+      const p = map.project(L.ll), ax = p.x * s, ay = p.y * sy;
+      if(ax < 0 || ay < 0 || ax > W || ay > H) continue;
+      const { fs, w } = sizeName(text, L.area);
+      const pad = 6 * s;                                     // keep the whole name on screen
+      for(const [dx, dy] of SPOTS){
+        const xx = clamp(ax + dx * w, w / 2 + pad, W - w / 2 - pad), yy = clamp(ay + dy * fs, fs, H - fs);
+        if(fits({ x: xx - w / 2, y: yy - fs * 0.75, w, h: fs * 1.5 })){ drawCountry(text, xx, yy, fs, 1); break; }
       }
     }
-    if(!st){                                                   // preview: draw straight away
-      if(placed) drawCountry(text, placed[0], placed[1], fs, 1);
-      continue;
-    }
-    if(placed){
-      const off = [placed[0] - ax, placed[1] - ay];
-      st.off = st.a < 0.05 ? off : [st.off[0] + (off[0] - st.off[0]) * kP, st.off[1] + (off[1] - st.off[1]) * kP];
-      st.fs = fs; st.text = text;
-    }
-    st.a += ((placed ? 1 : 0) - st.a) * kA;
-    if(st.a > 0.02 && st.fs){
-      const p = map.project(st.ll);
-      drawCountry(st.text, p.x * s + st.off[0], p.y * sy + st.off[1], st.fs, st.a);
-    }
-  }
-  // names no longer measured (gone off-screen or hidden) fade out where they were
-  if(labelAnim){
-    for(const [k, st] of labelAnim){
-      if(k === 'stamp' || st.seen === stamp || !k.startsWith('c|')) continue;
-      st.a += (0 - st.a) * kA;
-      if(st.a > 0.02 && st.fs && !(globe && angDist(ctr, st.ll) > 80)){
+  } else {
+    // video: each name is pinned to one spot on the map when it first appears and
+    // then moves exactly with the map, like a printed name. It only ever fades.
+    const z = map.getZoom();
+    const present = new Set(countries.map(L => L.name));
+    const pinned = [];
+    for(const [k, st] of labelAnim) if(k !== 'stamp' && k.startsWith('c|')) pinned.push([k, st]);
+    pinned.sort((a, b) => b[1].fs0 - a[1].fs0);              // bigger names keep their place first
+    for(const [k, st] of pinned){
+      const behind = globe && angDist(ctr, st.ll) > 78;
+      let onScr = false, x = 0, y = 0, fs = 0, box = null;
+      if(!behind){
         const p = map.project(st.ll);
-        drawCountry(st.text, p.x * s + st.off[0], p.y * sy + st.off[1], st.fs, st.a);
+        x = p.x * s; y = p.y * sy;
+        fs = st.fs0 * clamp(Math.pow(2, z - st.z0), 0.5, 2); // grows and shrinks with the map if it zooms
+        ctx.font = `600 ${fs}px ${fam}`;
+        const w = measureTracked(ctx, st.text, fs * trk);
+        box = { x: x - w / 2, y: y - fs * 0.75, w, h: fs * 1.5 };
+        onScr = box.x + box.w > 0 && box.x < W && box.y + box.h > 0 && box.y < H;
+      }
+      // a name that runs into another (as the globe curves away) fades out and stays out until it has gone
+      const near = onScr && present.has(st.name) && !(globe && angDist(ctr, st.ll) > 70);
+      let show = false;
+      if(near && !st.clash){ if(fits(box)) show = true; else st.clash = true; }
+      st.a += ((show ? 1 : 0) - st.a) * kA;
+      if(st.a > 0.02 && onScr) drawCountry(st.text, x, y, fs, st.a);
+      // gone for good (scrolled away, behind the globe, or no longer on the map): forget the spot
+      if(st.a <= 0.02 && (!onScr || behind || !present.has(st.name))) labelAnim.delete(k);
+    }
+    // names appearing for the first time: find a free spot fully on screen and pin it there
+    for(const L of countries){
+      if(labelAnim.has('c|' + L.name)) continue;
+      const text = kg ? L.name : L.name.toUpperCase();
+      if(Math.sqrt(L.area) < 30 || (globe && angDist(ctr, L.ll) > 70)) continue;
+      const p = map.project(L.ll), ax = p.x * s, ay = p.y * sy;
+      if(ax < 0 || ay < 0 || ax > W || ay > H) continue;
+      const { fs, w } = sizeName(text, L.area);
+      const pad = 6 * s;
+      for(const [dx, dy] of SPOTS){
+        const xx = ax + dx * w, yy = ay + dy * fs;
+        if(xx - w / 2 < pad || xx + w / 2 > W - pad || yy - fs * 0.75 < 0 || yy + fs * 0.75 > H) continue;
+        if(!fits({ x: xx - w / 2, y: yy - fs * 0.75, w, h: fs * 1.5 })) continue;
+        const ll = map.unproject([xx / s, yy / sy]);
+        const st = { name:L.name, text, ll:[ll.lng, ll.lat], fs0:fs, z0:z, a: labelFirst ? 1 : 0 };
+        labelAnim.set('c|' + L.name, st);
+        st.a += (1 - st.a) * kA;
+        drawCountry(text, xx, yy, fs, st.a);
+        break;
       }
     }
   }
