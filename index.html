@@ -28,7 +28,10 @@
   #overlayCv,#flagCv{position:absolute;inset:0;pointer-events:none;}
   .flagInfo{display:flex;align-items:center;gap:10px;margin-top:6px;}
   #flagThumb{height:30px;width:auto;border-radius:2px;box-shadow:0 1px 3px rgba(0,0,0,.6);display:none;}
-  #flagCountry{max-width:100%;flex:1 0 100%;}
+  #flagCountry,#hlCountry{max-width:100%;flex:1 0 100%;}
+  .camStop{display:block;width:100%;text-align:left;margin-top:6px;}
+  .camBtns button{flex:1 1 0;}
+  #camList .hint{margin:4px 0 0;}
   #paperCv{position:absolute;inset:0;pointer-events:none;mix-blend-mode:multiply;}
   #safeGuides{position:absolute;inset:0;pointer-events:none;display:none;}
   #safeGuides div{position:absolute;left:0;right:0;background:rgba(255,80,80,.10);border-top:1px dashed rgba(255,120,120,.55);border-bottom:1px dashed rgba(255,120,120,.55);}
@@ -267,6 +270,14 @@
       </div>
 
       <div class="group">
+        <div class="gHd">Highlight</div>
+        <div class="row"><label for="hlOn">Highlight a country</label><input type="checkbox" class="sw" id="hlOn"></div>
+        <div class="row stack"><label for="hlCountry">Country</label>
+          <select id="hlCountry"><option value="">Choose a country…</option></select></div>
+        <div class="hint">The other countries dim and this one gets a glowing gold outline. In a video it fades in when the camera move arrives at its last stop (or once the clouds clear).</div>
+      </div>
+
+      <div class="group">
         <div class="gHd">Globe</div>
         <div class="row stack"><label for="fxSpinSpeed">Spin speed</label>
           <input type="range" id="fxSpinSpeed" min="0" max="1" step="0.01" value="0.08">
@@ -348,6 +359,20 @@
         <div class="gHd">Years in the video</div>
         <div class="row"><label for="simFrom">From</label><input type="number" id="simFrom" value="1400" inputmode="numeric"></div>
         <div class="row"><label for="simTo">To</label><input type="number" id="simTo" value="1600" inputmode="numeric"></div>
+      </div>
+
+      <div class="group">
+        <div class="gHd">Camera move</div>
+        <div class="row"><label for="camOn">Move the camera</label><input type="checkbox" class="sw" id="camOn"></div>
+        <div id="camList"></div>
+        <div class="stepper camBtns">
+          <button id="camAdd">Add this view</button>
+          <button id="camUndo">Remove last</button>
+          <button id="camClear">Clear</button>
+        </div>
+        <button id="camPlay" class="wide">Play the move</button>
+        <button id="camPreset" class="wide">Middle East → Iraq (20 s, Iraq highlighted)</button>
+        <div class="hint">Move the map to where the video should start and tap “Add this view”. Move to the next spot and add it again, and so on. The video glides through the stops in order, then holds on the last one for the final few seconds. Spinning is off while this is on.</div>
       </div>
 
       <div class="group">
@@ -2464,7 +2489,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 32;
+const APP_VERSION = 33;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2514,7 +2539,9 @@ const S = {
   preview: 'fit',
   safe: false,
   look: { on:true, strength:0.7, glow:0.6, paper:0, seeThrough:false },   // campaign-map style
-  flag: { on:false, name:'', size:1 },                          // one waving flag, from Wikipedia
+  flag: { on:false, name:'', size:1 },
+  cam: { on:false, stops:[] },                          // camera stops for the video
+  hl: { on:false, name:'' },                            // highlighted country                          // one waving flag, from Wikipedia
   det: { terrain:false, rivers:false, trad:false, fillNameKey:null, hideMicro:true, names:true, cities:true, cityNames:true, labelSize:1.2,
          only:false, chosen:[], phersuKey:null },
   saveData: true,        // keep every style/tile we download, reuse it for free
@@ -2704,6 +2731,9 @@ function addCampaignLayers(st){
     if(L.maxzoom !== undefined) base.maxzoom = L.maxzoom;
     const vis = g.show ? 'visible' : 'none';
     if(isWaterLayer(L)){
+      // highlight: the sea dims right here, beneath the countries, so it can never cover land
+      out.push(Object.assign({ id:CMP + 'hl-dimw-' + L.id, type:'fill', layout:{ visibility: hlActive() ? 'visible' : 'none' },
+        paint:{ 'fill-color':'#000000', 'fill-opacity':hlPaint('dimw', 1) } }, JSON.parse(JSON.stringify(base))));
       if(/lake|reservoir|inland|lagoon/i.test(L.id + ' ' + (L['source-layer'] || ''))) continue;   // lakes get no band
       out.push(Object.assign({ id:CMP + 'coast-' + L.id, type:'line',
         layout:{ 'line-join':'round', visibility: lookOn() ? 'visible' : 'none' },
@@ -2729,8 +2759,159 @@ function addCampaignLayers(st){
       paint:{ 'line-color':'#140e0a', 'line-width':1.1, 'line-opacity':0.85 } },
       JSON.parse(JSON.stringify(base))));
   }
+  // highlight: the other countries and the sea dim, the chosen country gets a gold outline
+  const hlVis = hlActive() ? 'visible' : 'none', outl = [];
+  for(const L of st.layers){
+    if(L.type !== 'fill' || L.id.startsWith(CMP) || L.id === 'terrain') continue;
+    const base = { source:L.source };
+    if(L['source-layer']) base['source-layer'] = L['source-layer'];
+    if(L.filter) base.filter = JSON.parse(JSON.stringify(L.filter));
+    if(L.minzoom !== undefined) base.minzoom = L.minzoom;
+    if(L.maxzoom !== undefined) base.maxzoom = L.maxzoom;
+    if(isWaterLayer(L)) continue;                      // (the sea's dimming sits with the sea, above)
+    out.push(Object.assign({ id:CMP + 'hl-dim-' + L.id, type:'fill', layout:{ visibility:hlVis },
+      paint:{ 'fill-color':'#000000', 'fill-opacity':hlPaint('dim', 1) } }, base));
+    outl.push(Object.assign({ id:CMP + 'hl-glow-' + L.id, type:'line', layout:{ 'line-join':'round', visibility:hlVis },
+      paint:{ 'line-color':'#ffcf5a', 'line-width':9, 'line-blur':7, 'line-opacity':hlPaint('glow', 1) } }, JSON.parse(JSON.stringify(base))));
+    outl.push(Object.assign({ id:CMP + 'hl-line-' + L.id, type:'line', layout:{ 'line-join':'round', visibility:hlVis },
+      paint:{ 'line-color':'#fff0b8', 'line-width':2.4, 'line-opacity':hlPaint('line', 1) } }, JSON.parse(JSON.stringify(base))));
+  }
+  for(const L of outl) out.push(L);
   st.layers = out;
   return st;
+}
+/* ------------------------------------------------------------- highlight */
+function hlActive(){ return !!(S.hl && S.hl.on && S.hl.name); }
+function hlNameExpr(){
+  const keys = [];
+  for(const k of [tradKey(), 'name', 'name_en', 'NAME', 'Name']) if(k && !keys.includes(k)) keys.push(k);
+  return ['to-string', ['coalesce', ...keys.map(k => ['get', k]), '']];
+}
+function hlPaint(kind, a){
+  const is = ['==', hlNameExpr(), S.hl.name || '\u0000'];
+  if(kind === 'dim')  return ['case', is, 0, 0.5 * a];
+  if(kind === 'dimw') return 0.42 * a;
+  if(kind === 'glow') return ['case', is, 0.8 * a, 0];
+  return ['case', is, a, 0];
+}
+let hlSig = '';
+function refreshHighlight(a){
+  if(!map) return;
+  const vis = hlActive() && a > 0.001;
+  const sig = (vis ? 1 : 0) + '|' + S.hl.name + '|' + tradKey() + '|' + a.toFixed(3);
+  if(sig === hlSig) return;
+  let st = null; try { st = map.getStyle(); } catch(e){}
+  if(!st || !st.layers) return;
+  hlSig = sig;
+  for(const L of st.layers){
+    if(!L.id.startsWith(CMP + 'hl-')) continue;
+    try {
+      map.setLayoutProperty(L.id, 'visibility', vis ? 'visible' : 'none');
+      if(!vis) continue;
+      const kind = L.id.slice((CMP + 'hl-').length).split('-')[0];
+      map.setPaintProperty(L.id, L.type === 'fill' ? 'fill-opacity' : 'line-opacity', hlPaint(kind, a));
+    } catch(e){ console.warn('highlight', L.id, e); }
+  }
+}
+/* When the highlight fades in during a video: as the camera reaches its last
+   stop, or (with no camera move) once the opening clouds have cleared. */
+function hlAlphaAt(t, totalSecs){
+  if(!hlActive()) return 0;
+  const t0 = camStops() ? camTiming(totalSecs).move - 1.0 : (S.fx.clouds ? S.fx.cloudSecs * 0.8 : 0.3);
+  const k = clamp((t - t0) / 1.5, 0, 1);
+  return k * k * (3 - 2 * k);
+}
+/* --------------------------------------------------------- camera move */
+function stageCssW(){ const s = $('stage'); return (s && s.clientWidth) || 1; }
+function camStops(){ return (S.cam && S.cam.on && S.cam.stops && S.cam.stops.length >= 2) ? S.cam.stops : null; }
+function camTiming(totalSecs){ const hold = Math.min(4, totalSecs * 0.2); return { move: Math.max(0.5, totalSecs - hold), hold }; }
+function camAt(t, totalSecs){
+  const P = camStops();
+  if(!P) return null;
+  const w = stageCssW();
+  // the same framing whatever the screen or video size: zoom follows the width
+  const Z = P.map(s => s.zoom + Math.log2(w / (s.w || w)));
+  const dLng = (a, b) => { let d = b.lng - a.lng; if(d > 180) d -= 360; if(d < -180) d += 360; return d; };
+  // each leg gets time in proportion to how far it travels on screen
+  const cost = [];
+  for(let i = 0; i < P.length - 1; i++){
+    const a = P[i], b = P[i + 1], zm = Math.min(Z[i], Z[i + 1]);
+    const ml = Math.cos((a.lat + b.lat) / 2 * Math.PI / 180);
+    const px = Math.hypot(dLng(a, b), (b.lat - a.lat) / Math.max(0.2, ml)) * 512 * Math.pow(2, zm) / 360;
+    cost.push(0.4 + px / w + Math.abs(Z[i + 1] - Z[i]) * 0.9);
+  }
+  const tot = cost.reduce((s, c) => s + c, 0);
+  let u = clamp(t / camTiming(totalSecs).move, 0, 1) * tot, i = 0;
+  while(i < cost.length - 1 && u > cost[i]){ u -= cost[i]; i++; }
+  const s = clamp(u / cost[i], 0, 1);
+  const e = 0.5 - 0.5 * Math.cos(Math.PI * s);                 // ease out of one stop and into the next
+  const a = P[i], b = P[i + 1], dz = Z[i + 1] - Z[i];
+  // while zooming, travel mostly while zoomed out, so the move looks even on screen
+  const q = Math.abs(dz) < 1e-3 ? e : (1 - Math.pow(2, -dz * e)) / (1 - Math.pow(2, -dz));
+  let lng = a.lng + dLng(a, b) * q;
+  if(lng > 180) lng -= 360; if(lng < -180) lng += 360;
+  return { lng, lat:a.lat + (b.lat - a.lat) * q, zoom:Z[i] + dz * e,
+           bearing:(a.bearing || 0) + ((b.bearing || 0) - (a.bearing || 0)) * e,
+           pitch:(a.pitch || 0) + ((b.pitch || 0) - (a.pitch || 0)) * e };
+}
+function camStopLabel(s, i){
+  const ns = s.lat >= 0 ? 'N' : 'S', ew = s.lng >= 0 ? 'E' : 'W';
+  return `${i + 1}. ${Math.abs(s.lat).toFixed(1)}°${ns} ${Math.abs(s.lng).toFixed(1)}°${ew} · zoom ${(s.zoom + Math.log2(stageCssW() / (s.w || stageCssW()))).toFixed(1)}`;
+}
+function updateCamUI(){
+  const box = $('camList');
+  if(!box) return;
+  $('camOn').checked = !!S.cam.on;
+  const n = S.cam.stops.length;
+  box.innerHTML = n
+    ? S.cam.stops.map((s, i) => `<button class="camStop" data-i="${i}">${escapeHTML(camStopLabel(s, i))}</button>`).join('') +
+      (n < 2 ? '<div class="hint">Add at least one more view.</div>' : '')
+    : '<div class="hint">No stops yet.</div>';
+  $('camUndo').disabled = $('camClear').disabled = !n;
+  $('camPlay').disabled = n < 2;
+}
+function jumpToStop(s){
+  if(!map) return;
+  map.jumpTo({ center:[s.lng, s.lat], zoom:clamp(s.zoom + Math.log2(stageCssW() / (s.w || stageCssW())), 0, S.maxZoom),
+               bearing:s.bearing || 0, pitch:s.pitch || 0 });
+}
+let camPlayRAF = 0;
+function playCamMove(){
+  if(!map || S.cam.stops.length < 2) return;
+  cancelAnimationFrame(camPlayRAF);
+  const was = S.cam.on; S.cam.on = true;
+  const secs = parseFloat($('expSecs').value) || 8, t0 = performance.now();
+  const step = () => {
+    const tt = (performance.now() - t0) / 1000;
+    const c = camAt(Math.min(tt, secs), secs);
+    if(c) map.jumpTo({ center:[c.lng, c.lat], zoom:clamp(c.zoom, 0, S.maxZoom), bearing:c.bearing, pitch:c.pitch });
+    refreshHighlight(hlAlphaAt(tt, secs));
+    if(tt < secs) camPlayRAF = requestAnimationFrame(step);
+    else { camPlayRAF = 0; S.cam.on = was; refreshHighlight(hlActive() ? 1 : 0); updateCamUI(); }
+  };
+  camPlayRAF = requestAnimationFrame(step);
+}
+/* One tap: across the Middle East from Egypt to Iran, then into Iraq, which lights up. */
+function presetMiddleEastIraq(){
+  const { W, H } = expDims(), dpr = window.devicePixelRatio || 1;
+  const cssW = W / dpr, short = Math.min(W, H) / dpr;
+  const zFor = span => Math.log2(short * 360 / (512 * span));   // span: degrees across the video's shorter side
+  S.cam.stops = [
+    { lng:31.0, lat:30.5, zoom:zFor(22), bearing:0, pitch:0, w:cssW },   // Egypt and the Levant
+    { lng:52.0, lat:31.0, zoom:zFor(22), bearing:0, pitch:0, w:cssW },   // across Arabia to Iran
+    { lng:43.8, lat:33.2, zoom:zFor(10.5), bearing:0, pitch:0, w:cssW }  // into Iraq
+  ];
+  S.cam.on = true;
+  const names = Array.from(flagNames.get(S.year) || []);
+  S.hl.name = names.find(n => /\bIraq\b/i.test(n)) || S.hl.name || 'Kingdom of Iraq';
+  S.hl.on = true;
+  $('expSecs').value = 20; S.exp.secs = 20;
+  $('hlOn').checked = true;
+  refreshFlagList();
+  save(); updateCamUI();
+  hlSig = ''; refreshHighlight(1);
+  jumpToStop(S.cam.stops[0]);
+  setStatus('Ready: tap Play the move to preview it, or Export MP4 to make the 20-second video.');
 }
 /* --------------------------------------------- traditional country colours
    Matched on key words in the name, so "Kingdom of France", "French Republic"
@@ -3945,17 +4126,20 @@ function updateFlagUI(){
   else th.style.display = 'none';
 }
 function refreshFlagList(){
-  const sel = $('flagCountry');
+  fillCountrySelect($('hlCountry'), S.hl.name);
+  fillCountrySelect($('flagCountry'), S.flag.name);
+}
+function fillCountrySelect(sel, current){
   if(!sel) return;
   const set = flagNames.get(S.year) || new Set();
   const names = Array.from(set).sort((a, b) => a.localeCompare(b));
-  if(S.flag.name && !set.has(S.flag.name)) names.unshift(S.flag.name);      // keep their choice showing
+  if(current && !set.has(current)) names.unshift(current);                  // keep their choice showing
   const sig = names.join('\u0001');
   if(sel.dataset.sig === sig) return;
   sel.dataset.sig = sig;
   sel.innerHTML = '<option value="">Choose a country…</option>' +
     names.map(n => `<option value="${escapeHTML(n)}">${escapeHTML(n)}</option>`).join('');
-  sel.value = S.flag.name || '';
+  sel.value = current || '';
 }
 /* A fixed spot inside the country: the middle of its biggest piece of land.
    Map tiles cut a country into pieces, so touching pieces are joined first. */
@@ -4021,6 +4205,7 @@ function updateFlagData(feats){
     for(const poly of polys) if(poly && poly[0] && poly[0].length >= 4) rings.push(poly[0]);
   }
   refreshFlagList();
+  if(!labelCtx && !camPlayRAF) refreshHighlight(hlActive() ? 1 : 0);
   if(want && rings.length){
     const sp = flagSpot(rings);
     const fa = flagAnchor, same = fa && fa.year === S.year && fa.name === want;
@@ -5724,6 +5909,8 @@ function stateAt(t, totalSecs){
   const from = trialOn() ? S.trialYear : S.sim.from;
   const to   = trialOn() ? S.trialYear : S.sim.to;
   const p = totalSecs ? clamp(t / totalSecs, 0, 1) : 0;
+  const cam = camAt(t, totalSecs);
+  if(cam) return Object.assign({ year: Math.round(from + (to - from) * p) }, cam);
   return {
     year: Math.round(from + (to - from) * p),
     lng: v.lng + spinOffset(t), lat: v.lat,
@@ -5889,6 +6076,7 @@ async function exportVideo(){
       if(st.year !== lastYear){ setYear(st.year); lastYear = st.year; }
       map.jumpTo({ center:[st.lng, st.lat], zoom:clamp(st.zoom, 0, S.maxZoom),
                    bearing:st.bearing, pitch:st.pitch });
+      refreshHighlight(hlAlphaAt(t, secs));
       await settle(true, 8000);
 
       ctx.fillStyle = S.bg;
@@ -5936,6 +6124,7 @@ async function exportVideo(){
   } finally {
     labelAnim = null; labelFirst = false; labelCtx = null;
     startFlagPreview();
+    refreshHighlight(hlActive() ? 1 : 0);
     btn.disabled = false; bar.style.display = 'none'; fill.style.width = '0%';
     exportBase = null;
     S.preview = prevPreview;
@@ -5981,6 +6170,28 @@ function wire(){
   $('lookOn').addEventListener('change', e => { S.look.on = e.target.checked; applyGradeCSS(); refreshStyle(); scheduleLabels(); drawOverlayPreview(); save(); });
   $('lookGlow').addEventListener('input', e => { S.look.glow = +e.target.value; refreshCampaign(); save(); });
   $('detLabelSize').addEventListener('input', e => { S.det.labelSize = +e.target.value; drawOverlayPreview(); save(); });
+  $('hlOn').addEventListener('change', e => { S.hl.on = e.target.checked; save(); hlSig = ''; refreshHighlight(hlActive() ? 1 : 0); });
+  $('hlCountry').addEventListener('change', e => {
+    S.hl.name = e.target.value;
+    if(S.hl.name && !S.hl.on){ S.hl.on = true; $('hlOn').checked = true; }
+    save(); hlSig = ''; refreshHighlight(hlActive() ? 1 : 0);
+  });
+  $('camOn').addEventListener('change', e => { S.cam.on = e.target.checked; save(); updateCamUI(); });
+  $('camAdd').addEventListener('click', () => {
+    if(!map) return;
+    const c = map.getCenter();
+    S.cam.stops.push({ lng:+c.lng.toFixed(4), lat:+c.lat.toFixed(4), zoom:+map.getZoom().toFixed(3),
+                       bearing:+map.getBearing().toFixed(2), pitch:+map.getPitch().toFixed(2), w:stageCssW() });
+    S.cam.on = true; save(); updateCamUI();
+  });
+  $('camUndo').addEventListener('click', () => { S.cam.stops.pop(); save(); updateCamUI(); });
+  $('camClear').addEventListener('click', () => { S.cam.stops = []; save(); updateCamUI(); });
+  $('camList').addEventListener('click', e => {
+    const b = e.target.closest('.camStop');
+    if(b) jumpToStop(S.cam.stops[+b.dataset.i]);
+  });
+  $('camPlay').addEventListener('click', playCamMove);
+  $('camPreset').addEventListener('click', presetMiddleEastIraq);
   $('flagSize').addEventListener('input', e => { S.flag.size = +e.target.value; drawOverlayPreview(); save(); });
   $('flagOn').addEventListener('change', e => {
     S.flag.on = e.target.checked; save();
@@ -6113,6 +6324,8 @@ function applyStateToUI(){
   $('saveData').checked = S.saveData !== false;
   $('detNames').checked = !!S.det.names;
   $('flagOn').checked = !!S.flag.on;
+  $('hlOn').checked = !!S.hl.on;
+  updateCamUI();
   $('flagSize').value = S.flag.size || 1;
   refreshFlagList(); updateFlagUI();
   if(S.flag.on && S.flag.name) loadFlag(S.flag.name);
@@ -6201,7 +6414,9 @@ save = function(){
       fx: Object.assign(S.fx, saved.fx || {}),
       det: Object.assign(S.det, saved.det || {}),
       look: Object.assign(S.look, saved.look || {}),
-      flag: Object.assign(S.flag, saved.flag || {})
+      flag: Object.assign(S.flag, saved.flag || {}),
+      cam: Object.assign(S.cam, saved.cam || {}),
+      hl: Object.assign(S.hl, saved.hl || {})
     });
   }
   // Old builds defaulted to a fast spin; move anyone still on it to very slow.
