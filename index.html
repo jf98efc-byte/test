@@ -25,7 +25,10 @@
                      linear-gradient(45deg,transparent 75%,#1b1f28 75%),linear-gradient(-45deg,transparent 75%,#1b1f28 75%);
     background-size:24px 24px;background-position:0 0,0 12px,12px -12px,-12px 0;}
   #map{position:absolute;inset:0;}
-  #overlayCv{position:absolute;inset:0;pointer-events:none;}
+  #overlayCv,#flagCv{position:absolute;inset:0;pointer-events:none;}
+  .flagInfo{display:flex;align-items:center;gap:10px;margin-top:6px;}
+  #flagThumb{height:30px;width:auto;border-radius:2px;box-shadow:0 1px 3px rgba(0,0,0,.6);display:none;}
+  #flagCountry{max-width:100%;flex:1 0 100%;}
   #paperCv{position:absolute;inset:0;pointer-events:none;mix-blend-mode:multiply;}
   #safeGuides{position:absolute;inset:0;pointer-events:none;display:none;}
   #safeGuides div{position:absolute;left:0;right:0;background:rgba(255,80,80,.10);border-top:1px dashed rgba(255,120,120,.55);border-bottom:1px dashed rgba(255,120,120,.55);}
@@ -182,6 +185,7 @@
         <div id="map"></div>
         <canvas id="paperCv"></canvas>
         <canvas id="overlayCv"></canvas>
+        <canvas id="flagCv"></canvas>
         <div id="safeGuides"><div id="guideTop"></div><div id="guideBot"></div></div>
       </div>
     </div>
@@ -248,6 +252,15 @@
         <div class="row"><label for="detRivers">River &amp; lake names</label><input type="checkbox" class="sw" id="detRivers"></div>
         <div class="row"><label for="detHideMicro">Hide tiny-country &amp; territory capitals</label><input type="checkbox" class="sw" id="detHideMicro" checked></div>
         <div class="row stack"><label for="detLabelSize">Name size</label><input type="range" id="detLabelSize" min="0.6" max="2.2" step="0.05" value="1.2"></div>
+      </div>
+
+      <div class="group">
+        <div class="gHd">Flag</div>
+        <div class="row"><label for="flagOn">Show a flag</label><input type="checkbox" class="sw" id="flagOn"></div>
+        <div class="row stack"><label for="flagCountry">Country</label>
+          <select id="flagCountry"><option value="">Choose a country…</option></select></div>
+        <div class="flagInfo"><img id="flagThumb" alt=""><div class="hint" id="flagNote" style="margin:0;"></div></div>
+        <div class="hint">A waving flag on a gold pole, planted in the country. The flag comes from the country’s Wikipedia page (free — no map loads used). The list shows the countries on the map in this year.</div>
       </div>
 
       <div class="group">
@@ -2421,7 +2434,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 27;
+const APP_VERSION = 28;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2471,6 +2484,7 @@ const S = {
   preview: 'fit',
   safe: false,
   look: { on:true, strength:0.7, glow:0.6, paper:0 },   // campaign-map style
+  flag: { on:false, name:'' },                          // one waving flag, from Wikipedia
   det: { terrain:false, rivers:false, trad:false, fillNameKey:null, hideMicro:true, names:true, cities:true, cityNames:true, labelSize:1.2,
          only:false, chosen:[], phersuKey:null },
   saveData: true,        // keep every style/tile we download, reuse it for free
@@ -3309,12 +3323,13 @@ function computeLabels(){
   LABELS = [];
   if(!map) return;
   const D = S.det;
+  const fillFeats = sourceFeatures(fillLayerIds());
+  updateFlagData(fillFeats);
   if(!D.names && !(D.cities && D.cityNames)) return;
   const globe = S.projection === 'globe';
   const ctr = map.getCenter();
   const cont = map.getContainer(), cw = cont.clientWidth, ch = cont.clientHeight;
   const hidingNow = hidingActive();
-  const fillFeats = sourceFeatures(fillLayerIds());
   const chosenRings = [];
   if(hidingNow){
     const key = nameKeyNow();
@@ -3593,6 +3608,8 @@ function drawLabelsNow(ctx, W, H){
   const globe = S.projection === 'globe';
   const ctr = map.getCenter();
   const boxes = overlayReserve(W, H);
+  const flagG = flagGeom(W, H);
+  if(flagG) for(const b of flagG.boxes) boxes.push(b);   // names keep clear of the flag
   const fits = b => {
     for(const o of boxes) if(b.x < o.x + o.w && b.x + b.w > o.x && b.y < o.y + o.h && b.y + b.h > o.y) return false;
     boxes.push(b); return true;
@@ -3780,6 +3797,321 @@ function drawLabelsNow(ctx, W, H){
     }
   }
   ctx.restore();
+}
+/* ------------------------------------------------------------------ flag --
+   One waving flag on a gold pole, planted at a fixed spot in a chosen country.
+   The flag picture comes from the country's English Wikipedia page: the
+   picture at the top of its info box when that is a flag, otherwise the flag
+   Wikipedia's own data (Wikidata) lists for it. */
+const flagCache = new Map();      // country name -> { status, img, thumb, page, file }
+const flagNames = new Map();      // year -> names of the countries seen on the map
+let flagAnchor = null;            // { year, name, ll, area }
+let flagCloth = null;             // scratch canvas for the waving cloth
+async function wikiJSON(base, params){
+  const u = base + '?' + new URLSearchParams(Object.assign({ format:'json', formatversion:'2', origin:'*' }, params)).toString();
+  const r = await fetch(u);
+  if(!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+function wikiYear(snak){
+  const v = snak && snak.datavalue && snak.datavalue.value;
+  const m = v && /^([+-]?\d+)/.exec(v.time || '');
+  return m ? parseInt(m[1], 10) : null;
+}
+async function findWikiFlag(name){
+  const WP = 'https://en.wikipedia.org/w/api.php';
+  const props = { prop:'pageimages|pageprops', piprop:'thumbnail|name', pithumbsize:'800',
+                  ppprop:'wikibase_item|disambiguation', redirects:'1' };
+  let j = await wikiJSON(WP, Object.assign({ action:'query', titles:name }, props));
+  let page = j.query && j.query.pages && j.query.pages[0];
+  if(!page || page.missing || page.invalid || (page.pageprops && 'disambiguation' in page.pageprops)){
+    j = await wikiJSON(WP, Object.assign({ action:'query', generator:'search', gsrsearch:name, gsrlimit:'1', gsrnamespace:'0' }, props));
+    page = j.query && j.query.pages && j.query.pages[0];
+  }
+  if(!page || page.missing) return null;
+  if(page.thumbnail && page.pageimage && /flag/i.test(page.pageimage))
+    return { page:page.title, file:page.pageimage, thumb:page.thumbnail.source };
+  const q = page.pageprops && page.pageprops.wikibase_item;
+  if(!q) return null;
+  const wd = await wikiJSON('https://www.wikidata.org/w/api.php', { action:'wbgetclaims', entity:q, property:'P41' });
+  const claims = ((wd.claims && wd.claims.P41) || []).filter(c => c.rank !== 'deprecated' && c.mainsnak && c.mainsnak.datavalue);
+  if(!claims.length) return null;
+  const yr = S.year;
+  const dated = claims.find(c => {
+    const qs = c.qualifiers || {};
+    const a = qs.P580 ? wikiYear(qs.P580[0]) : null, b = qs.P582 ? wikiYear(qs.P582[0]) : null;
+    return (a !== null || b !== null) && (a === null || a <= yr) && (b === null || yr <= b);
+  });
+  const pick = dated || claims.find(c => c.rank === 'preferred') || claims.find(c => !(c.qualifiers && c.qualifiers.P582)) || claims[0];
+  const file = pick.mainsnak.datavalue.value;
+  const ci = await wikiJSON('https://commons.wikimedia.org/w/api.php', { action:'query', titles:'File:' + file, prop:'imageinfo', iiprop:'url', iiurlwidth:'800' });
+  const pg = ci.query && ci.query.pages && ci.query.pages[0];
+  const info = pg && pg.imageinfo && pg.imageinfo[0];
+  if(!info) return null;
+  return { page:page.title, file, thumb:info.thumburl || info.url };
+}
+function loadFlag(name){
+  if(!name) { updateFlagUI(); return; }
+  const have = flagCache.get(name);
+  if(have && (have.status === 'ready' || have.status === 'loading')){ updateFlagUI(); return; }
+  const rec = { status:'loading' };
+  flagCache.set(name, rec);
+  updateFlagUI();
+  (async () => {
+    try {
+      const found = await findWikiFlag(name);
+      if(!found) rec.status = 'none';
+      else {
+        Object.assign(rec, found);
+        const img = new Image();
+        img.crossOrigin = 'anonymous';           // so the video export can still use it
+        await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('image')); img.src = found.thumb; });
+        rec.img = img; rec.status = 'ready';
+      }
+    } catch(e){ rec.status = 'error'; }
+    updateFlagUI(); drawOverlayPreview(); startFlagPreview();
+  })();
+}
+function flagImgNow(){
+  const r = S.flag.name ? flagCache.get(S.flag.name) : null;
+  return r && r.status === 'ready' ? r.img : null;
+}
+function updateFlagUI(){
+  const note = $('flagNote'), th = $('flagThumb');
+  if(!note || !th) return;
+  const n = S.flag.name, r = n ? flagCache.get(n) : null;
+  const yrSet = flagNames.get(S.year);
+  let msg;
+  if(!n) msg = 'Pick a country from the list.';
+  else if(!r || r.status === 'loading') msg = 'Getting the flag from Wikipedia…';
+  else if(r.status === 'none') msg = 'No flag found on Wikipedia for ' + n + '.';
+  else if(r.status === 'error') msg = 'Couldn’t reach Wikipedia. Check your connection, then pick the country again.';
+  else {
+    msg = 'From the Wikipedia page “' + r.page + '”.';
+    if(yrSet && yrSet.size && !yrSet.has(n)) msg += ' ' + n + ' isn’t on the map in this year, so no flag is shown.';
+  }
+  note.textContent = msg;
+  if(r && r.status === 'ready'){ if(th.getAttribute('src') !== r.thumb) th.src = r.thumb; th.style.display = 'block'; }
+  else th.style.display = 'none';
+}
+function refreshFlagList(){
+  const sel = $('flagCountry');
+  if(!sel) return;
+  const set = flagNames.get(S.year) || new Set();
+  const names = Array.from(set).sort((a, b) => a.localeCompare(b));
+  if(S.flag.name && !set.has(S.flag.name)) names.unshift(S.flag.name);      // keep their choice showing
+  const sig = names.join('\u0001');
+  if(sel.dataset.sig === sig) return;
+  sel.dataset.sig = sig;
+  sel.innerHTML = '<option value="">Choose a country…</option>' +
+    names.map(n => `<option value="${escapeHTML(n)}">${escapeHTML(n)}</option>`).join('');
+  sel.value = S.flag.name || '';
+}
+/* A fixed spot inside the country: the middle of its biggest piece of land.
+   Map tiles cut a country into pieces, so touching pieces are joined first. */
+function flagSpot(rings){
+  let P = [];
+  for(const ring of rings){
+    let a = 0, cx = 0, cy = 0, x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for(let i = 0, j = ring.length - 1; i < ring.length; j = i++){
+      const cr = ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1];
+      a += cr; cx += (ring[j][0] + ring[i][0]) * cr; cy += (ring[j][1] + ring[i][1]) * cr;
+    }
+    if(Math.abs(a) < 1e-9) continue;
+    for(const q of ring){ if(q[0] < x0) x0 = q[0]; if(q[0] > x1) x1 = q[0]; if(q[1] < y0) y0 = q[1]; if(q[1] > y1) y1 = q[1]; }
+    const c = [cx / (3 * a), cy / (3 * a)];
+    P.push({ ring, c, A:Math.abs(a) / 2 * Math.cos(c[1] * Math.PI / 180), bb:[x0, y0, x1, y1] });
+  }
+  if(!P.length) return null;
+  const maxA = Math.max(...P.map(p => p.A));
+  const seen = new Set();
+  P = P.filter(p => {
+    if(p.A < maxA * 0.002) return false;                                  // specks
+    const k = p.c[0].toFixed(3) + ',' + p.c[1].toFixed(3) + ',' + p.A.toPrecision(4);
+    if(seen.has(k)) return false;                                         // same piece from two tiles
+    seen.add(k); return true;
+  });
+  const par = P.map((_, i) => i);
+  const find = i => par[i] === i ? i : (par[i] = find(par[i]));
+  const pad = 0.3;
+  for(let i = 0; i < P.length; i++) for(let j = i + 1; j < P.length; j++){
+    const a = P[i].bb, b = P[j].bb;
+    if(a[0] - pad <= b[2] && b[0] - pad <= a[2] && a[1] - pad <= b[3] && b[1] - pad <= a[3]) par[find(i)] = find(j);
+  }
+  const groups = new Map();
+  P.forEach((p, i) => { const r = find(i); const g = groups.get(r) || { A:0, x:0, y:0, ps:[] }; g.A += p.A; g.x += p.c[0] * p.A; g.y += p.c[1] * p.A; g.ps.push(p); groups.set(r, g); });
+  let best = null;
+  for(const g of groups.values()) if(!best || g.A > best.A) best = g;
+  let ll = [best.x / best.A, best.y / best.A];
+  if(!best.ps.some(p => inRingLL(ll, p.ring))){                           // middle falls outside (a curved country)
+    let pick = null, dBest = Infinity;
+    for(const p of best.ps){
+      if(!inRingLL(p.c, p.ring)) continue;
+      const d = (p.c[0] - ll[0]) ** 2 + (p.c[1] - ll[1]) ** 2;
+      if(d < dBest){ dBest = d; pick = p; }
+    }
+    ll = pick ? pick.c.slice() : best.ps.reduce((m, p) => p.A > m.A ? p : m).c.slice();
+  }
+  return { ll, area:best.A };
+}
+function updateFlagData(feats){
+  if(!map || !feats.length) return;
+  let set = flagNames.get(S.year);
+  if(!set){ set = new Set(); flagNames.set(S.year, set); }
+  const want = S.flag.on && S.flag.name ? S.flag.name : null;
+  const rings = [];
+  for(const f of feats){
+    const props = f.properties || {};
+    const n = nameOf(props, tradKey() || pickNameKey(Object.keys(props)));
+    if(!n) continue;
+    set.add(n);
+    if(n !== want) continue;
+    const g = f.geometry || {};
+    const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+    for(const poly of polys) if(poly && poly[0] && poly[0].length >= 4) rings.push(poly[0]);
+  }
+  refreshFlagList();
+  if(want && rings.length){
+    const sp = flagSpot(rings);
+    const fa = flagAnchor, same = fa && fa.year === S.year && fa.name === want;
+    // once found, the spot only moves if much more of the country comes into view (never mid-export)
+    if(sp && (!same || (!labelCtx && sp.area > fa.area * 1.15))){
+      flagAnchor = { year:S.year, name:want, ll:sp.ll, area:sp.area };
+    }
+  }
+  updateFlagUI();
+}
+function flagGeom(W, H){
+  const img = flagImgNow();
+  if(!S.flag.on || !img || !map || !flagAnchor || flagAnchor.name !== S.flag.name) return null;
+  const yrSet = flagNames.get(S.year);
+  if(yrSet && yrSet.size && !yrSet.has(S.flag.name)) return null;         // not a country in this year
+  let vis = 1;
+  if(S.projection === 'globe'){
+    vis = clamp((82 - angDist(map.getCenter(), flagAnchor.ll)) / 12, 0, 1); // fades as it turns away
+    if(vis <= 0) return null;
+  }
+  const cont = map.getContainer();
+  const p = map.project(flagAnchor.ll);
+  const x = p.x * W / (cont.clientWidth || W), y = p.y * H / (cont.clientHeight || H);
+  const poleH = Math.min(W, H) * 0.25;
+  const pw = Math.max(2, poleH * 0.024);
+  const ch = poleH * 0.34;
+  const cw = ch * clamp(img.naturalWidth / Math.max(1, img.naturalHeight), 1, 2.2);
+  const top = y - poleH;
+  if(x + cw + pw * 4 < 0 || x - pw * 4 > W || y + pw * 4 < 0 || top - pw * 4 > H) return null;
+  return { img, x, y, poleH, pw, ch, cw, top, vis,
+           boxes:[{ x:x - pw * 3, y:top - pw * 4.5, w:pw * 6, h:poleH + pw * 6 },               // pole
+                  { x:x, y:top - ch * 0.12, w:cw + pw * 3, h:ch * 1.3 }] };                    // cloth
+}
+function drawCloth(ctx, img, x0, y0, cw, ch, t){
+  const A = ch * 0.085;
+  const padY = Math.ceil(A * 1.4) + 2;
+  const ow = Math.ceil(cw) + 4, oh = Math.ceil(ch + padY * 2);
+  if(!flagCloth) flagCloth = document.createElement('canvas');
+  const oc = flagCloth;
+  if(oc.width !== ow || oc.height !== oh){ oc.width = ow; oc.height = oh; }
+  const o = oc.getContext('2d');
+  o.setTransform(1, 0, 0, 1, 0, 0);
+  o.globalCompositeOperation = 'source-over';
+  o.clearRect(0, 0, ow, oh);
+  o.imageSmoothingEnabled = true;
+  try { o.imageSmoothingQuality = 'high'; } catch(e){}
+  const N = clamp(Math.round(cw / 3), 18, 120);
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  const strips = [];
+  for(let i = 0; i < N; i++){
+    const u0 = i / N, u1 = (i + 1) / N, u = (u0 + u1) / 2;
+    const ph = Math.PI * 2 * (u * 1.15 - t * 0.85);
+    const amp = A * (0.12 + 0.88 * u);                  // fixed at the pole, freer at the end
+    const h = ch * (1 - 0.05 * u * Math.cos(ph));
+    const dy = padY + amp * Math.sin(ph) + (ch - h) / 2;
+    const lit = Math.cos(ph) * (0.25 + 0.75 * u);
+    strips.push([u0, u1, lit]);
+    o.drawImage(img, u0 * iw, 0, (u1 - u0) * iw, ih, u0 * cw, dy, (u1 - u0) * cw + 0.8, h);
+  }
+  o.globalCompositeOperation = 'source-atop';           // light and shade the folds, in one smooth sweep
+  const lg = o.createLinearGradient(0, 0, cw, 0);
+  for(const [u0, u1, lit] of strips){
+    lg.addColorStop((u0 + u1) / 2, lit > 0 ? `rgba(255,246,225,${(0.22 * lit).toFixed(3)})` : `rgba(0,0,0,${(-0.38 * lit).toFixed(3)})`);
+  }
+  o.fillStyle = lg; o.fillRect(0, 0, ow, oh);
+  const eg = o.createLinearGradient(0, 0, cw * 0.12, 0);
+  eg.addColorStop(0, 'rgba(0,0,0,0.28)'); eg.addColorStop(1, 'rgba(0,0,0,0)');
+  o.fillStyle = eg; o.fillRect(0, 0, cw * 0.12, oh);
+  o.globalCompositeOperation = 'source-over';
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = ch * 0.18;
+  ctx.shadowOffsetX = ch * 0.07; ctx.shadowOffsetY = ch * 0.1;
+  ctx.drawImage(oc, x0, y0 - padY);
+  ctx.restore();
+}
+function drawFlag(ctx, W, H, t){
+  const g = flagGeom(W, H);
+  if(!g) return;
+  const { img, x, y, pw, ch, cw, top, vis } = g;
+  ctx.save();
+  ctx.globalAlpha = vis;
+  // soft shadow where it stands
+  ctx.save();
+  ctx.translate(x + pw * 1.5, y);
+  ctx.scale(1, 0.32);
+  const sh = ctx.createRadialGradient(0, 0, 0, 0, 0, pw * 9);
+  sh.addColorStop(0, 'rgba(0,0,0,0.5)'); sh.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = sh; ctx.beginPath(); ctx.arc(0, 0, pw * 9, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // dark stand
+  const bw = pw * 4.4, bh = pw * 3.4;
+  const bg = ctx.createLinearGradient(x - bw / 2, 0, x + bw / 2, 0);
+  bg.addColorStop(0, '#15110e'); bg.addColorStop(0.4, '#4d4239'); bg.addColorStop(1, '#100d0b');
+  ctx.fillStyle = bg;
+  ctx.beginPath(); ctx.ellipse(x, y, bw / 2, bh * 0.28, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillRect(x - bw / 2, y - bh, bw, bh);
+  ctx.fillStyle = '#5c4f43';
+  ctx.beginPath(); ctx.ellipse(x, y - bh, bw / 2, bh * 0.28, 0, 0, Math.PI * 2); ctx.fill();
+  // gold pole
+  const gold = (a, b) => {
+    const gg = ctx.createLinearGradient(a, 0, b, 0);
+    gg.addColorStop(0, '#5a4110'); gg.addColorStop(0.35, '#f7dd86'); gg.addColorStop(0.62, '#c99c38'); gg.addColorStop(1, '#4c380e');
+    return gg;
+  };
+  ctx.fillStyle = gold(x - pw * 0.75, x + pw * 0.75);
+  ctx.fillRect(x - pw * 0.75, y - bh - pw * 0.8, pw * 1.5, pw * 0.8);                 // collar on the stand
+  ctx.fillStyle = gold(x - pw / 2, x + pw / 2);
+  ctx.fillRect(x - pw / 2, top, pw, y - bh - top);
+  // gold ball and spike on top
+  const fr = pw * 1.2, fy = top - fr * 0.85;
+  const fb = ctx.createRadialGradient(x - fr * 0.35, fy - fr * 0.35, fr * 0.1, x, fy, fr);
+  fb.addColorStop(0, '#fff2bf'); fb.addColorStop(0.45, '#d9ad45'); fb.addColorStop(1, '#5e4512');
+  ctx.fillStyle = fb; ctx.beginPath(); ctx.arc(x, fy, fr, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = gold(x - fr * 0.45, x + fr * 0.45);
+  ctx.beginPath(); ctx.moveTo(x - fr * 0.45, fy - fr * 0.8); ctx.lineTo(x + fr * 0.45, fy - fr * 0.8); ctx.lineTo(x, fy - fr * 3); ctx.closePath(); ctx.fill();
+  // the waving flag
+  drawCloth(ctx, img, x + pw / 2 - 0.5, top + pw * 0.6, cw, ch, t);
+  ctx.restore();
+}
+/* The preview shows the flag waving on its own layer, about 30 times a second. */
+let flagRAF = 0, flagLast = 0;
+function startFlagPreview(){
+  if(flagRAF) return;
+  const tick = now => {
+    flagRAF = 0;
+    const cv = $('flagCv'), st = $('stage');
+    if(!cv || !st) return;
+    const live = S.flag.on && flagImgNow() && !labelCtx;
+    if(!live){ cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); return; }
+    if(now - flagLast > 30){
+      flagLast = now;
+      const w = st.clientWidth, h = st.clientHeight, dpr = window.devicePixelRatio || 1;
+      const W = Math.round(w * dpr), H = Math.round(h * dpr);
+      if(cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = w + 'px'; cv.style.height = h + 'px'; }
+      const c = cv.getContext('2d');
+      c.clearRect(0, 0, W, H);
+      drawFlag(c, W, H, now / 1000);
+    }
+    flagRAF = requestAnimationFrame(tick);
+  };
+  flagRAF = requestAnimationFrame(tick);
 }
 /* Areas taken by the year, title and credit, so map names stay clear of them. */
 function overlayReserve(W, H){
@@ -5314,6 +5646,7 @@ async function exportVideo(){
       if(f === 0){ labelAnim = new Map(); labelDt = 1 / fps; labelFirst = true; labelCtx = ctx; }
       if(f % 6 === 0) computeLabels();
       drawLabels(ctx, W, H);
+      drawFlag(ctx, W, H, t);
       drawAtmosphere(ctx, W, H, t);
       drawOverlay(ctx, W, H, st.year);
 
@@ -5349,6 +5682,7 @@ async function exportVideo(){
     console.error(err);
   } finally {
     labelAnim = null; labelFirst = false; labelCtx = null;
+    startFlagPreview();
     btn.disabled = false; bar.style.display = 'none'; fill.style.width = '0%';
     exportBase = null;
     S.preview = prevPreview;
@@ -5393,6 +5727,17 @@ function wire(){
   $('lookOn').addEventListener('change', e => { S.look.on = e.target.checked; applyGradeCSS(); refreshStyle(); scheduleLabels(); drawOverlayPreview(); save(); });
   $('lookGlow').addEventListener('input', e => { S.look.glow = +e.target.value; refreshCampaign(); save(); });
   $('detLabelSize').addEventListener('input', e => { S.det.labelSize = +e.target.value; drawOverlayPreview(); save(); });
+  $('flagOn').addEventListener('change', e => {
+    S.flag.on = e.target.checked; save();
+    if(S.flag.on && S.flag.name){ loadFlag(S.flag.name); scheduleLabels(); }
+    updateFlagUI(); drawOverlayPreview(); startFlagPreview();
+  });
+  $('flagCountry').addEventListener('change', e => {
+    S.flag.name = e.target.value; flagAnchor = null;
+    if(S.flag.name && !S.flag.on){ S.flag.on = true; $('flagOn').checked = true; }
+    save(); loadFlag(S.flag.name); scheduleLabels();
+    updateFlagUI(); drawOverlayPreview(); startFlagPreview();
+  });
   $('saveData').addEventListener('change', e => { S.saveData = e.target.checked; save(); });
   $('offlineMode').addEventListener('change', e => {
     S.offline = e.target.checked; save();
@@ -5512,6 +5857,9 @@ function applyStateToUI(){
   $('trialMode').checked = !!S.trial;
   $('saveData').checked = S.saveData !== false;
   $('detNames').checked = !!S.det.names;
+  $('flagOn').checked = !!S.flag.on;
+  refreshFlagList(); updateFlagUI();
+  if(S.flag.on && S.flag.name) loadFlag(S.flag.name);
   $('detCities').checked = !!S.det.cities;
   $('detCityNames').checked = !!S.det.cityNames;
   $('detRivers').checked = !!S.det.rivers;
@@ -5595,7 +5943,8 @@ save = function(){
       exp: Object.assign(S.exp, saved.exp || {}),
       fx: Object.assign(S.fx, saved.fx || {}),
       det: Object.assign(S.det, saved.det || {}),
-      look: Object.assign(S.look, saved.look || {})
+      look: Object.assign(S.look, saved.look || {}),
+      flag: Object.assign(S.flag, saved.flag || {})
     });
   }
   // Old builds defaulted to a fast spin; move anyone still on it to very slow.
