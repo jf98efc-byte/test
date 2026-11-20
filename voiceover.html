@@ -21903,7 +21903,7 @@ async function xi(k, u) {
   const { waveform: Z } = await m.generate(H, B, l, k.length);
   return D?.("Encoding WAV…"), mi(Z, 24e3);
 }
-const kittenTTS = xi;
+const KittenEngine = _4, kittenIds = pi, KITTEN_MODELS = Di;
 
 
 {
@@ -22037,14 +22037,62 @@ function chunks(line) { // keep each model call under ~400 characters
 /* ---------- generation ---------- */
 function setStatus(msg, err) { $('status').textContent = msg; $('status').className = err ? 'err' : ''; }
 function setProg(f) { $('prog').style.width = Math.round(f * 100) + '%'; }
-function opts() {
-  return { voice: $('voice').value, speed: Number($('speed').value), model: $('model').value,
-    onProgress: s => { if (/Download|Load|Initial/i.test(s)) setStatus(s + ' (first time only)'); } };
+/* model download: real progress + saved on the phone so it only downloads once */
+const CACHE = 'kitten-models-v1';
+async function getBytes(url, label, onPct) {
+  let cache = null;
+  try { cache = await caches.open(CACHE); const hit = await cache.match(url); if (hit) return await hit.blob(); } catch (e) {}
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Download failed (${res.status})`);
+  const total = +res.headers.get('content-length') || 0;
+  const reader = res.body.getReader(), parts = [];
+  let got = 0, last = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value); got += value.length;
+    if (performance.now() - last > 250) {
+      last = performance.now();
+      const mb = (got / 1048576).toFixed(1);
+      setStatus(`Downloading ${label}: ${mb} MB${total ? ' of ' + (total/1048576).toFixed(0) + ' MB' : ''} (first time only)`);
+      if (total) onPct(got / total);
+    }
+  }
+  const blob = new Blob(parts);
+  try { if (cache) await cache.put(url, new Response(blob)); } catch (e) {}
+  return blob;
+}
+const engines = {};
+function getEngine(size) {
+  if (engines[size]) return engines[size];
+  const p = (async () => {
+    if (!navigator.gpu) throw new Error('WebGPU not available. Update to iOS 26 or newer.');
+    const M = KITTEN_MODELS[size];
+    setStatus('Starting the graphics chip…');
+    const eng = new KittenEngine();
+    await eng.init();
+    const model = await getBytes(M.url, `voice model`, f => setProg(f * 0.95));
+    const voices = await getBytes(M.voicesUrl, 'voices', () => {});
+    setStatus('Loading model into memory… (10–20 seconds)');
+    setProg(0.97);
+    const mu = URL.createObjectURL(model), vu = URL.createObjectURL(voices);
+    try { await eng.loadModel(mu, vu); } finally { URL.revokeObjectURL(mu); URL.revokeObjectURL(vu); }
+    setProg(1);
+    return eng;
+  })();
+  engines[size] = p;
+  p.catch(() => { delete engines[size]; });
+  return p;
 }
 async function speakLine(text) {
   const spoken = $('nums').checked ? speakable(text) : text;
-  const o = opts(), parts = [];
-  for (const c of chunks(spoken)) parts.push(await wavToFloat(await kittenTTS(c, o)));
+  const eng = await getEngine($('model').value);
+  const voice = $('voice').value, speed = Number($('speed').value), parts = [];
+  for (const c of chunks(spoken)) {
+    const { ids } = await kittenIds(c);
+    const { waveform } = await eng.generate(ids, voice, speed, c.length);
+    parts.push(Float32Array.from(waveform));
+  }
   return { spoken, audio: joinAudio(parts, 0.15) };
 }
 function lock(b) {
