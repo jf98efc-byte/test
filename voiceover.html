@@ -22133,19 +22133,33 @@ let speakLine = async function (text) {
   return { spoken, audio: joinAudio(parts, 0.15) };
 }
 const speakLineOnce = speakLine;
+/* After the phone kills the graphics chip, Safari won't give this page a new one
+   until it reloads. So: step down a quality level, reload, and carry on automatically. */
+const RESUME = 'voiceoverStudio.resume';
+function reloadAndResume(msg, model) {
+  let n = 0;
+  try { n = +(sessionStorage.getItem(RESUME) || 0); } catch (e) {}
+  if (n >= 3) { try { sessionStorage.removeItem(RESUME); } catch (e) {} throw new Error('The graphics chip keeps stopping. Close Safari fully (swipe it away), reopen it, and try Fast quality.'); }
+  if (model) { $('model').value = model; save(); }
+  try { sessionStorage.setItem(RESUME, String(n + 1)); } catch (e) {}
+  setStatus(msg + ' Reloading the page to carry on…');
+  __log('[Studio] ' + msg + ' reloading');
+  setTimeout(() => location.reload(), 1500);
+  return new Promise(() => {}); // the page reloads before this finishes
+}
 speakLine = async function (text) {
-  for (;;) {
-    try { return await speakLineOnce(text); }
-    catch (e) {
-      lostReject = null;
-      const cur = $('model').value, next = SMALLER[cur];
-      if (e.message !== 'GPU_LOST') throw e;
+  try { return await speakLineOnce(text); }
+  catch (e) {
+    lostReject = null;
+    const cur = $('model').value, next = SMALLER[cur];
+    if (e.message === 'GPU_LOST') {
       if (!next) throw new Error('This iPhone ran out of graphics memory even on Fast. Close other apps and tabs, then reload.');
-      __log(`[Studio] ${QNAME[cur]} quality too heavy, switching to ${QNAME[next]}`);
-      $('model').value = next; save();
-      setStatus(`${QNAME[cur]} quality is too heavy for this iPhone, switching to ${QNAME[next]}…`);
-      await new Promise(r => setTimeout(r, 1500));
+      return reloadAndResume(`${QNAME[cur]} quality is too heavy for this iPhone, switching to ${QNAME[next]}.`, next);
     }
+    if (/WebGPU not available/i.test(e.message) && navigator.gpu) {
+      return reloadAndResume('Safari paused the graphics chip.', null);
+    }
+    throw e;
   }
 };
 function lock(b) {
@@ -22180,6 +22194,7 @@ $('go').onclick = async () => {
       renderClips(); setProg((i + 1) / lines.length);
     }
     renderFull();
+    try { sessionStorage.removeItem(RESUME); } catch (e) {}
     setStatus(`Done: ${lines.length} clip${lines.length > 1 ? 's' : ''} in ${((performance.now()-t0)/1000).toFixed(1)}s.`);
   } catch (e) { setStatus('Error: ' + e.message, true); }
   lock(false);
@@ -22243,6 +22258,7 @@ function renderFull() {
   $('saveFull').onclick = () => saveFile(fullBlob, 'full_voiceover.wav');
 }
 $('pause').addEventListener('change', renderFull);
+try { if (sessionStorage.getItem(RESUME) && $('script').value.trim()) setTimeout(() => $('go').click(), 600); } catch (e) {}
 }
 </script>
 </body>
