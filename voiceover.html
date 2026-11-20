@@ -22045,11 +22045,11 @@ function joinAudio(parts, gapSec) {
   parts.forEach((p, i) => { out.set(p, o); o += p.length + (i < parts.length - 1 ? gap : 0); });
   return out;
 }
-function chunks(line) { // keep each model call under ~400 characters
+function chunks(line) { // short pieces use less phone memory
   const sents = line.match(/[^.!?]+[.!?]*\s*/g) || [line];
   const out = []; let cur = '';
   for (const s of sents) {
-    if ((cur + s).length > 400 && cur) { out.push(cur.trim()); cur = ''; }
+    if ((cur + s).length > 180 && cur) { out.push(cur.trim()); cur = ''; }
     cur += s;
   }
   if (cur.trim()) out.push(cur.trim());
@@ -22107,14 +22107,15 @@ function getEngine(size) {
   p.catch(() => { delete engines[size]; });
   return p;
 }
-let gpuLost = null;
-window.addEventListener('webgpu-device-lost', e => {
-  gpuLost = 'The phone stopped the graphics chip (usually low memory). Close other apps or tabs, reload, and try Good or Fast quality.';
+let lostReject = null;
+window.addEventListener('webgpu-device-lost', () => {
   for (const k in engines) delete engines[k];
-  setStatus(gpuLost, true);
+  if (lostReject) lostReject(new Error('GPU_LOST'));
 });
+const SMALLER = { mini: 'micro', micro: 'nano' };
+const QNAME = { mini: 'Best', micro: 'Good', nano: 'Fast' };
 let prefix = '';
-async function speakLine(text) {
+let speakLine = async function (text) {
   const spoken = $('nums').checked ? speakable(text) : text;
   const eng = await getEngine($('model').value);
   const voice = $('voice').value, speed = Number($('speed').value), parts = [];
@@ -22123,13 +22124,30 @@ async function speakLine(text) {
     const { ids } = await kittenIds(c);
     __log('[Studio] ' + ids.length + ' sounds, generating');
     setStatus(prefix + 'Speaking…');
-    const { waveform } = await eng.generate(ids, voice, speed, c.length);
+    const lost = new Promise((_, rej) => { lostReject = rej; });
+    const { waveform } = await Promise.race([eng.generate(ids, voice, speed, c.length), lost]);
+    lostReject = null;
     __log('[Studio] got ' + (waveform.length / SR).toFixed(1) + 's of audio');
-    if (gpuLost) throw new Error(gpuLost);
     parts.push(Float32Array.from(waveform));
   }
   return { spoken, audio: joinAudio(parts, 0.15) };
 }
+const speakLineOnce = speakLine;
+speakLine = async function (text) {
+  for (;;) {
+    try { return await speakLineOnce(text); }
+    catch (e) {
+      lostReject = null;
+      const cur = $('model').value, next = SMALLER[cur];
+      if (e.message !== 'GPU_LOST') throw e;
+      if (!next) throw new Error('This iPhone ran out of graphics memory even on Fast. Close other apps and tabs, then reload.');
+      __log(`[Studio] ${QNAME[cur]} quality too heavy, switching to ${QNAME[next]}`);
+      $('model').value = next; save();
+      setStatus(`${QNAME[cur]} quality is too heavy for this iPhone, switching to ${QNAME[next]}…`);
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+};
 function lock(b) {
   state.busy = b;
   for (const id of ['go','preview']) $(id).disabled = b;
