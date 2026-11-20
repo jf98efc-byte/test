@@ -388,6 +388,7 @@
       <button id="exportBtn" class="primary big">Export MP4</button>
       <div id="exportBar"><div id="exportBarFill"></div></div>
       <div id="status"></div>
+      <div class="hint" id="expNote" style="display:none;color:#ffcf8a;"></div>
     </section>
 
     <!-- ============================== SETUP ============================ -->
@@ -2489,7 +2490,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 33;
+const APP_VERSION = 34;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -5975,6 +5976,27 @@ async function settle(wait, timeoutMs){
 }
 
 /* ---------------------------------------------------------------- export */
+/* A long export takes minutes on a phone. If the screen locks, Safari pauses the
+   page and the video encoder can be shut down, so keep the screen awake. */
+let wakeLock = null, exportRunning = false;
+async function keepAwake(on){
+  try {
+    if(on && !wakeLock && navigator.wakeLock && !document.hidden){
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if(!on && wakeLock){ const w = wakeLock; wakeLock = null; await w.release(); }
+  } catch(e){ wakeLock = null; }
+}
+document.addEventListener('visibilitychange', () => { if(!document.hidden && exportRunning) keepAwake(true); });
+function noteExport(v){ try { if(v) localStorage.setItem('pmvExportProgress', JSON.stringify(v)); else localStorage.removeItem('pmvExportProgress'); } catch(e){} }
+function lastExportNote(){
+  try {
+    const v = JSON.parse(localStorage.getItem('pmvExportProgress') || 'null');
+    if(!v || Date.now() - v.at > 2 * 86400000) return null;
+    return `The last export stopped at frame ${v.f} of ${v.total} because the page was closed or reloaded. ` +
+           `That's usually Safari running out of memory. Try again with "Smoothness" set to 30 fps, or a shorter length.`;
+  } catch(e){ return null; }
+}
 async function exportVideo(){
   if(!map){ setStatus('Connect first.'); return; }
   if(typeof VideoEncoder === 'undefined' || typeof Mp4Muxer === 'undefined'){
@@ -6008,6 +6030,9 @@ async function exportVideo(){
   const btn = $('exportBtn'), bar = $('exportBar'), fill = $('exportBarFill');
   btn.disabled = true; bar.style.display = 'block';
   setStatus('Preparing...');
+  exportRunning = true; keepAwake(true);
+  $('expNote').style.display = 'none';
+  noteExport({ f:0, total, at:Date.now() });
 
   // remember view + stage so we can put everything back
   const prevPreview = S.preview;
@@ -6029,7 +6054,7 @@ async function exportVideo(){
 
   // H.264 first (what YouTube likes); VP9 only as a rescue for browsers built
   // without proprietary codecs, so the export still produces a file.
-  let cfg = null, muxCodec = 'avc', muxer = null, encoder = null;
+  let cfg = null, muxCodec = 'avc', muxer = null, encoder = null, encErr = null;
   const tryCodecs = [
     ['avc1.640034','avc'], ['avc1.640033','avc'], ['avc1.4d0034','avc'], ['avc1.42003e','avc'],
     ['vp09.00.10.08','vp9'], ['vp09.00.41.08','vp9']          // rescue for builds without H.264
@@ -6056,11 +6081,11 @@ async function exportVideo(){
   muxer = new Mp4Muxer.Muxer({
     target: new Mp4Muxer.ArrayBufferTarget(),
     video: { codec:muxCodec, width:W, height:H, frameRate:fps },
-    fastStart: 'in-memory'
+    fastStart: { expectedVideoChunks: total }
   });
   encoder = new VideoEncoder({
     output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-    error: e => setStatus('Encoder error: ' + e.message)
+    error: e => { encErr = e && e.message ? e.message : String(e); }
   });
   encoder.configure(cfg);
   if(muxCodec === 'vp9') setStatus('No H.264 encoder here — falling back to VP9.');
@@ -6069,15 +6094,19 @@ async function exportVideo(){
   exportBase = { lng: c0.lng, lat: c0.lat, zoom: z0, bearing: b0, pitch: p0 };
   const mapCv = map.getCanvas();
   try {
-    let lastYear = null;
+    let lastYear = null, slowTiles = 0;
     for(let f = 0; f < total; f++){
+      if(encErr) throw new Error('the video encoder stopped (' + encErr + ')');
       const t = f / fps;
       const st = stateAt(t, secs);
       if(st.year !== lastYear){ setYear(st.year); lastYear = st.year; }
       map.jumpTo({ center:[st.lng, st.lat], zoom:clamp(st.zoom, 0, S.maxZoom),
                    bearing:st.bearing, pitch:st.pitch });
       refreshHighlight(hlAlphaAt(t, secs));
-      await settle(true, 8000);
+      const ts = performance.now();
+      await settle(true, slowTiles > 2 ? 2500 : 8000);       // after repeated long waits, don't hang on each frame
+      if(performance.now() - ts > 2400){ slowTiles++; setStatus(`Waiting for map pieces to load… frame ${f+1} of ${total}`); }
+      else slowTiles = 0;
 
       ctx.fillStyle = S.bg;
       ctx.fillRect(0, 0, W, H);
@@ -6097,11 +6126,13 @@ async function exportVideo(){
         });
         encoder.encode(frame, { keyFrame: f % fps === 0 });
         frame.close();
-        if(encoder.encodeQueueSize > 8) await new Promise(r => setTimeout(r, 0));
+        // let the encoder catch up, so unfinished frames don't pile up in memory
+        for(let k = 0; k < 400 && encoder.encodeQueueSize > 3 && !encErr; k++) await new Promise(r => setTimeout(r, 5));
       }
+      if(f % 30 === 0) noteExport({ f:f + 1, total, at:Date.now() });
       if(f % 3 === 0){
         fill.style.width = (100 * f / total) + '%';
-        setStatus(`Rendering frame ${f+1} of ${total} · ${yearLabel(st.year)}`);
+        if(!slowTiles) setStatus(`Rendering frame ${f+1} of ${total} · ${yearLabel(st.year)} — keep Safari open and the screen on`);
         await nextFrame();
       }
     }
@@ -6109,6 +6140,7 @@ async function exportVideo(){
     let blob, fname;
     {
       await encoder.flush();
+      if(encErr) throw new Error('the video encoder stopped (' + encErr + ')');
       muxer.finalize();
       blob = new Blob([muxer.target.buffer], { type:'video/mp4' });
       fname = `phersu-map-${W}x${H}-${fps}fps.mp4`;
@@ -6119,9 +6151,13 @@ async function exportVideo(){
       `) — ` +
       `<a class="dl" href="${url}" download="${fname}">download MP4</a>`;
   } catch(err){
-    setStatus('Export failed: ' + err.message);
+    const m = String(err && err.message || err);
+    setStatus('Export failed: ' + m + (/encoder|codec|closed/i.test(m)
+      ? '. This usually happens when the screen locks or Safari goes into the background during the export. Keep Safari open with the screen on, and try again.' : ''));
     console.error(err);
   } finally {
+    exportRunning = false; keepAwake(false); noteExport(null);
+    try { if(encoder && encoder.state !== 'closed') encoder.close(); } catch(e){}
     labelAnim = null; labelFirst = false; labelCtx = null;
     startFlagPreview();
     refreshHighlight(hlActive() ? 1 : 0);
@@ -6447,6 +6483,8 @@ save = function(){
   initMap();
   renderLayerUI();
   setStatus('Ready. Tap "Load map" to start.');
+  { const n = lastExportNote(); if(n){ $('expNote').textContent = n; $('expNote').style.display = 'block'; } }
+  noteExport(null);
   try {
     Promise.all(["700 40px Cinzel", "600 40px Cinzel", "600 40px 'EB Garamond'", "700 40px 'EB Garamond'", "italic 700 40px 'Cormorant Garamond'", "italic 600 40px 'Cormorant Garamond'"]
       .map(f => document.fonts.load(f))).then(() => drawOverlayPreview());
