@@ -259,6 +259,7 @@
         <div class="row"><label for="flagOn">Show a flag</label><input type="checkbox" class="sw" id="flagOn"></div>
         <div class="row stack"><label for="flagCountry">Country</label>
           <select id="flagCountry"><option value="">Choose a country…</option></select></div>
+        <div class="row stack"><label for="flagSize">Flag size</label><input type="range" id="flagSize" min="0.4" max="2.5" step="0.05" value="1"></div>
         <div class="flagInfo"><img id="flagThumb" alt=""><div class="hint" id="flagNote" style="margin:0;"></div></div>
         <div class="hint">A waving flag on a gold pole, planted in the country. The flag comes from the country’s Wikipedia page (free — no map loads used). The list shows the countries on the map in this year.</div>
       </div>
@@ -2434,7 +2435,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 29;
+const APP_VERSION = 30;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -2484,7 +2485,7 @@ const S = {
   preview: 'fit',
   safe: false,
   look: { on:true, strength:0.7, glow:0.6, paper:0 },   // campaign-map style
-  flag: { on:false, name:'' },                          // one waving flag, from Wikipedia
+  flag: { on:false, name:'', size:1 },                          // one waving flag, from Wikipedia
   det: { terrain:false, rivers:false, trad:false, fillNameKey:null, hideMicro:true, names:true, cities:true, cityNames:true, labelSize:1.2,
          only:false, chosen:[], phersuKey:null },
   saveData: true,        // keep every style/tile we download, reuse it for free
@@ -4014,7 +4015,7 @@ function flagGeom(W, H){
   const cont = map.getContainer();
   const p = map.project(flagAnchor.ll);
   const x = p.x * W / (cont.clientWidth || W), y = p.y * H / (cont.clientHeight || H);
-  const poleH = Math.min(W, H) * 0.25;
+  const poleH = Math.min(W, H) * 0.25 * clamp(+S.flag.size || 1, 0.4, 2.5);
   const pw = Math.max(2, poleH * 0.024);
   const ch = poleH * 0.34;
   const cw = ch * clamp(img.naturalWidth / Math.max(1, img.naturalHeight), 1, 2.2);
@@ -5747,6 +5748,7 @@ function wire(){
   $('lookOn').addEventListener('change', e => { S.look.on = e.target.checked; applyGradeCSS(); refreshStyle(); scheduleLabels(); drawOverlayPreview(); save(); });
   $('lookGlow').addEventListener('input', e => { S.look.glow = +e.target.value; refreshCampaign(); save(); });
   $('detLabelSize').addEventListener('input', e => { S.det.labelSize = +e.target.value; drawOverlayPreview(); save(); });
+  $('flagSize').addEventListener('input', e => { S.flag.size = +e.target.value; drawOverlayPreview(); save(); });
   $('flagOn').addEventListener('change', e => {
     S.flag.on = e.target.checked; save();
     if(S.flag.on && S.flag.name){ loadFlag(S.flag.name); scheduleLabels(); }
@@ -5878,6 +5880,7 @@ function applyStateToUI(){
   $('saveData').checked = S.saveData !== false;
   $('detNames').checked = !!S.det.names;
   $('flagOn').checked = !!S.flag.on;
+  $('flagSize').value = S.flag.size || 1;
   refreshFlagList(); updateFlagUI();
   if(S.flag.on && S.flag.name) loadFlag(S.flag.name);
   $('detCities').checked = !!S.det.cities;
