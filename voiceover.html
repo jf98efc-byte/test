@@ -92,8 +92,28 @@ audio{width:100%;margin-top:10px}
     <label>Clips</label>
     <div id="clips"><div class="empty">No clips yet.</div></div>
   </div>
+
+  <details class="card" id="logBox"><summary style="color:var(--dim);font-size:14px">Technical log (send me a screenshot if something goes wrong)</summary>
+    <pre id="log" style="white-space:pre-wrap;font-size:11px;color:var(--dim);margin:10px 0 0;max-height:320px;overflow:auto"></pre>
+  </details>
 </div>
 
+<script>
+(function(){
+  var t0=Date.now();
+  function add(kind,args){
+    try{
+      var el=document.getElementById('log'); if(!el) return;
+      var s=Array.prototype.map.call(args,function(a){return a&&a.message?a.message:(typeof a==='object'?JSON.stringify(a):String(a))}).join(' ');
+      el.textContent+=((Date.now()-t0)/1000).toFixed(1)+'s '+kind+' '+s.slice(0,300)+'\n';
+    }catch(e){}
+  }
+  ['log','warn','error'].forEach(function(k){var o=console[k];console[k]=function(){add(k==='log'?'':k.toUpperCase(),arguments);o.apply(console,arguments)}});
+  window.addEventListener('error',function(e){add('ERROR',[e.message])});
+  window.addEventListener('unhandledrejection',function(e){add('ERROR',[e.reason])});
+  window.__log=function(){add('',arguments)};
+})();
+</script>
 <script type="module">
 function l4() {
   typeof ReadableStream < "u" && !(Symbol.asyncIterator in ReadableStream.prototype) && (ReadableStream.prototype[Symbol.asyncIterator] = async function* () {
@@ -21903,7 +21923,9 @@ async function xi(k, u) {
   const { waveform: Z } = await m.generate(H, B, l, k.length);
   return D?.("Encoding WAV…"), mi(Z, 24e3);
 }
-const KittenEngine = _4, kittenIds = pi, KITTEN_MODELS = Di;
+const KittenEngine = _4, KITTEN_MODELS = Di;
+// Skip the WASM phonemizer (freezes iOS Safari); use the pure-JS dictionary one
+const kittenIds = async (t) => ({ ids: Va(await hi(t)) });
 
 
 {
@@ -22071,6 +22093,7 @@ function getEngine(size) {
     setStatus('Starting the graphics chip…');
     const eng = new KittenEngine();
     await eng.init();
+    kittenIds('warm up'); // start loading the pronunciation dictionary alongside the download
     const model = await getBytes(M.url, `voice model`, f => setProg(f * 0.95));
     const voices = await getBytes(M.voicesUrl, 'voices', () => {});
     setStatus('Loading model into memory… (10–20 seconds)');
@@ -22084,13 +22107,25 @@ function getEngine(size) {
   p.catch(() => { delete engines[size]; });
   return p;
 }
+let gpuLost = null;
+window.addEventListener('webgpu-device-lost', e => {
+  gpuLost = 'The phone stopped the graphics chip (usually low memory). Close other apps or tabs, reload, and try Good or Fast quality.';
+  for (const k in engines) delete engines[k];
+  setStatus(gpuLost, true);
+});
+let prefix = '';
 async function speakLine(text) {
   const spoken = $('nums').checked ? speakable(text) : text;
   const eng = await getEngine($('model').value);
   const voice = $('voice').value, speed = Number($('speed').value), parts = [];
   for (const c of chunks(spoken)) {
+    setStatus(prefix + 'Reading the words…');
     const { ids } = await kittenIds(c);
+    __log('[Studio] ' + ids.length + ' sounds, generating');
+    setStatus(prefix + 'Speaking…');
     const { waveform } = await eng.generate(ids, voice, speed, c.length);
+    __log('[Studio] got ' + (waveform.length / SR).toFixed(1) + 's of audio');
+    if (gpuLost) throw new Error(gpuLost);
     parts.push(Float32Array.from(waveform));
   }
   return { spoken, audio: joinAudio(parts, 0.15) };
@@ -22103,7 +22138,7 @@ function lock(b) {
 
 $('preview').onclick = async () => {
   if (state.busy) return;
-  lock(true); setStatus('Loading voice…');
+  lock(true); prefix = ''; setStatus('Loading voice…');
   try {
     const { audio } = await speakLine(`This is ${$('voice').value}. In the year 1139, a new kingdom was born.`);
     const a = new Audio(URL.createObjectURL(floatToWav(audio)));
@@ -22121,7 +22156,7 @@ $('go').onclick = async () => {
   const t0 = performance.now();
   try {
     for (let i = 0; i < lines.length; i++) {
-      setStatus(`Clip ${i+1} of ${lines.length}…`);
+      prefix = `Clip ${i+1} of ${lines.length}: `; setStatus(prefix);
       const r = await speakLine(lines[i]);
       state.clips.push({ text: lines[i], spoken: r.spoken, audio: r.audio, voice: $('voice').value });
       renderClips(); setProg((i + 1) / lines.length);
@@ -22167,7 +22202,7 @@ $('clips').onclick = async e => {
   if (b.dataset.act === 'play') new Audio(URL.createObjectURL(floatToWav(c.audio))).play();
   if (b.dataset.act === 'save') saveFile(floatToWav(c.audio), `clip_${String(i+1).padStart(2,'0')}.wav`);
   if (b.dataset.act === 'redo' && !state.busy) {
-    lock(true); setStatus(`Redoing clip ${i+1}…`);
+    lock(true); prefix = `Clip ${i+1}: `; setStatus(prefix);
     try {
       const r = await speakLine(c.text);
       state.clips[i] = { ...c, spoken: r.spoken, audio: r.audio, voice: $('voice').value };
