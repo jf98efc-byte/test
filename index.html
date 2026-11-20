@@ -2421,7 +2421,7 @@ return maplibregl$1;
 (function(){
 "use strict";
 
-const APP_VERSION = 26;
+const APP_VERSION = 27;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const trialOn = () => !!S.trial;
@@ -3563,8 +3563,30 @@ function measureTracked(ctx, text, track){
   return chars.reduce((a, c) => a + ctx.measureText(c).width, 0) + track * Math.max(0, chars.length - 1);
 }
 /* Names drawn in canvas pixels, so the preview and the exported video match. */
+/* During an export, names glide to new positions/sizes and fade in and out,
+   instead of jumping each time the map is re-measured. (Preview stays instant.) */
+let labelAnim = null, labelDt = 1 / 60, labelFirst = false, labelCtx = null;
+function animK(tau){ return labelAnim ? 1 - Math.exp(-labelDt / tau) : 1; }
+function animState(key, init){
+  if(!labelAnim) return null;
+  let st = labelAnim.get(key);
+  if(!st){ st = Object.assign({ a: labelFirst ? 1 : 0, seen: 0 }, init); labelAnim.set(key, st); }
+  return st;
+}
 function drawLabels(ctx, W, H){
-  if(!map || !LABELS.length) return;
+  // only the video frames glide; the small preview drawn alongside stays instant
+  const anim = labelAnim;
+  if(anim && ctx !== labelCtx) labelAnim = null;
+  try { drawLabelsNow(ctx, W, H); }
+  finally {
+    if(labelAnim) labelFirst = false;
+    labelAnim = anim;
+  }
+}
+function drawLabelsNow(ctx, W, H){
+  if(!map || (!LABELS.length && !labelAnim)) return;
+  const kA = animK(0.28), kP = animK(0.45);
+  const stamp = labelAnim ? (labelAnim.stamp = (labelAnim.stamp || 0) + 1) : 0;
   const cont = map.getContainer();
   const s = W / (cont.clientWidth || W);
   const sy = H / (cont.clientHeight || H);
@@ -3598,10 +3620,14 @@ function drawLabels(ctx, W, H){
     const db = { x: x - 5 * s, y: y - 5 * sy, w: 10 * s, h: 10 * sy };
     if(keepClear.some(o => db.x < o.x + o.w && db.x + db.w > o.x && db.y < o.y + o.h && db.y + db.h > o.y)) continue;   // under the year/title
     dotBoxes.push(db);   // country names keep off the dot
+    const cst = animState('p|' + L.name, {});
+    if(cst){ cst.seen = stamp; cst.a += (1 - cst.a) * kA; }
+    const ca = cst ? cst.a : 1;
     if(L.dot && lookOn()){
       // campaign style: a small red square with a thin light edge
       const h = 3.4 * s;
       ctx.save();
+      ctx.globalAlpha *= ca;
       ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 2 * s;
       ctx.fillStyle = '#d0261c'; ctx.fillRect(x - h, y - h, h * 2, h * 2);
       ctx.shadowBlur = 0;
@@ -3609,6 +3635,7 @@ function drawLabels(ctx, W, H){
       ctx.restore();
     } else if(L.dot){
       ctx.save();
+      ctx.globalAlpha *= ca;
       ctx.beginPath(); ctx.arc(x, y, 3.5 * s, 0, Math.PI * 2);
       ctx.fillStyle = '#ffffff'; ctx.fill();
       ctx.lineWidth = 1 * s; ctx.strokeStyle = '#000000'; ctx.stroke();
@@ -3628,6 +3655,7 @@ function drawLabels(ctx, W, H){
       }
       if(pos){
         ctx.textAlign = 'left';
+        ctx.globalAlpha *= ca;
         ctx.shadowColor = 'rgba(0,0,0,0.85)'; ctx.shadowBlur = fs * 0.35;
         ctx.lineWidth = fs * 0.14; ctx.strokeStyle = 'rgba(0,0,0,0.5)';
         ctx.strokeText(L.name, pos[0], pos[1]);
@@ -3646,48 +3674,86 @@ function drawLabels(ctx, W, H){
   }
   for(const b of dotBoxes) boxes.push(b);
   const countries = LABELS.filter(l => l.kind === 'country').sort((a, b) => b.area - a.area);
-  for(const L of countries){
-    const side = Math.sqrt(L.area);
-    if(side < 30) continue;                                 // too small to name
-    if(globe && angDist(ctr, L.ll) > 72) continue;
-    const p = map.project(L.ll), x = p.x * s, y = p.y * sy;
-    if(x < 0 || y < 0 || x > W || y > H) continue;
-    const ls = S.det.labelSize || 1;
-    let fsCss = clamp(side * 0.085, 9, 24) * ls;
-    const kg = lookOn();
-    const text = kg ? L.name : L.name.toUpperCase();
-    const fam = kg ? "'EB Garamond', Georgia, serif" : "'Cinzel', serif";
-    const trk = kg ? 0.01 : 0.14;
-    if(kg) fsCss *= 1.25;                                    // these read bigger, like campaign maps
-    ctx.font = `600 ${fsCss * s}px ${fam}`;
-    let w = measureTracked(ctx, text, fsCss * s * trk);
-    const maxW = Math.min(side * 1.5 * s, W * 0.86);       // never wider than the screen
-    if(w > maxW){                                            // shrink long names to fit
-      fsCss = Math.max(8 * ls, fsCss * maxW / w);
-      ctx.font = `600 ${fsCss * s}px ${fam}`;
-      w = measureTracked(ctx, text, fsCss * s * trk);
-    }
-    const fs = fsCss * s;
-    let placed = null;
-    search:
-    for(const dy of [0, -1.4, 1.4, -2.6, 2.6]){
-      for(const dx of [0, -0.35, 0.35]){
-        const pad = 6 * s;                                     // keep the whole name on screen
-        const xx = clamp(x + dx * w, w / 2 + pad, W - w / 2 - pad), yy = clamp(y + dy * fs, fs, H - fs);
-        if(fits({ x: xx - w / 2, y: yy - fs * 0.75, w, h: fs * 1.5 })){ placed = [xx, yy]; break search; }
-      }
-    }
-    if(placed === null) continue;
+  const kg = lookOn();
+  const fam = kg ? "'EB Garamond', Georgia, serif" : "'Cinzel', serif";
+  const trk = kg ? 0.01 : 0.14;
+  const drawCountry = (text, x, y, fs, alpha) => {
+    ctx.save();
+    ctx.globalAlpha *= alpha;
+    ctx.font = `600 ${fs}px ${fam}`;
     if(kg){
-      ctx.save();
       ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = fs * 0.3; ctx.shadowOffsetY = fs * 0.04;
       ctx.lineWidth = fs * 0.1; ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.fillStyle = '#ffffff';
-      trackText(ctx, text, placed[0], placed[1], fs * trk, 'center');
-      ctx.restore();
+      trackText(ctx, text, x, y, fs * trk, 'center');
+    } else {
+      ctx.lineWidth = fs * 0.24;
+      trackText(ctx, text, x, y, fs * 0.14, 'center');
+    }
+    ctx.restore();
+  };
+  for(const L of countries){
+    // the anchor and size glide towards each new measurement during an export
+    const st = animState('c|' + L.name, { ll: L.ll.slice(), area: L.area, off: [0, 0] });
+    if(st){
+      st.seen = stamp;
+      st.ll = [st.ll[0] + (L.ll[0] - st.ll[0]) * kP, st.ll[1] + (L.ll[1] - st.ll[1]) * kP];
+      st.area += (L.area - st.area) * kP;
+    }
+    const ll = st ? st.ll : L.ll, area = st ? st.area : L.area;
+    const text = kg ? L.name : L.name.toUpperCase();
+    let placed = null, fs = 0, ax = 0, ay = 0;
+    const side = Math.sqrt(area);
+    const visible = side >= 30 && !(globe && angDist(ctr, ll) > 72);
+    if(visible){
+      const p = map.project(ll); ax = p.x * s; ay = p.y * sy;
+      if(ax >= 0 && ay >= 0 && ax <= W && ay <= H){
+        const ls = S.det.labelSize || 1;
+        let fsCss = clamp(side * 0.085, 9, 24) * ls;
+        if(kg) fsCss *= 1.25;                                // these read bigger, like campaign maps
+        ctx.font = `600 ${fsCss * s}px ${fam}`;
+        let w = measureTracked(ctx, text, fsCss * s * trk);
+        const maxW = Math.min(side * 1.5 * s, W * 0.86);     // never wider than the screen
+        if(w > maxW){                                        // shrink long names to fit
+          fsCss = Math.max(8 * ls, fsCss * maxW / w);
+          ctx.font = `600 ${fsCss * s}px ${fam}`;
+          w = measureTracked(ctx, text, fsCss * s * trk);
+        }
+        fs = fsCss * s;
+        search:
+        for(const dy of [0, -1.4, 1.4, -2.6, 2.6]){
+          for(const dx of [0, -0.35, 0.35]){
+            const pad = 6 * s;                                 // keep the whole name on screen
+            const xx = clamp(ax + dx * w, w / 2 + pad, W - w / 2 - pad), yy = clamp(ay + dy * fs, fs, H - fs);
+            if(fits({ x: xx - w / 2, y: yy - fs * 0.75, w, h: fs * 1.5 })){ placed = [xx, yy]; break search; }
+          }
+        }
+      }
+    }
+    if(!st){                                                   // preview: draw straight away
+      if(placed) drawCountry(text, placed[0], placed[1], fs, 1);
       continue;
     }
-    ctx.lineWidth = fs * 0.24;
-    trackText(ctx, text, placed[0], placed[1], fs * 0.14, 'center');
+    if(placed){
+      const off = [placed[0] - ax, placed[1] - ay];
+      st.off = st.a < 0.05 ? off : [st.off[0] + (off[0] - st.off[0]) * kP, st.off[1] + (off[1] - st.off[1]) * kP];
+      st.fs = fs; st.text = text;
+    }
+    st.a += ((placed ? 1 : 0) - st.a) * kA;
+    if(st.a > 0.02 && st.fs){
+      const p = map.project(st.ll);
+      drawCountry(st.text, p.x * s + st.off[0], p.y * sy + st.off[1], st.fs, st.a);
+    }
+  }
+  // names no longer measured (gone off-screen or hidden) fade out where they were
+  if(labelAnim){
+    for(const [k, st] of labelAnim){
+      if(k === 'stamp' || st.seen === stamp || !k.startsWith('c|')) continue;
+      st.a += (0 - st.a) * kA;
+      if(st.a > 0.02 && st.fs && !(globe && angDist(ctr, st.ll) > 80)){
+        const p = map.project(st.ll);
+        drawCountry(st.text, p.x * s + st.off[0], p.y * sy + st.off[1], st.fs, st.a);
+      }
+    }
   }
   if(S.det.rivers){
     for(const L of LABELS.filter(l => l.kind === 'river')){
@@ -4856,6 +4922,15 @@ function drawAtmosphere(ctx, W, H, t){
     ctx.save();
     // Two offset layers give the cover depth, but the second is faint — at full
     // strength they stack and the map stays hidden.
+    // The cloud texture has gaps between the puffs, so a soft mist underneath covers
+    // the whole frame at the start, then thins out before the puffs do.
+    const mist = Math.pow(clamp((ca - 0.3) / 0.7, 0, 1), 1.5);
+    if(mist > 0){
+      const mg = ctx.createLinearGradient(0, 0, 0, H);
+      mg.addColorStop(0, `rgba(232,237,242,${mist})`);
+      mg.addColorStop(1, `rgba(214,222,230,${mist})`);
+      ctx.globalAlpha = 1; ctx.fillStyle = mg; ctx.fillRect(0, 0, W, H);
+    }
     const scale = 1 + (1 - ca) * 1.1;      // swells outward as it thins
     const cw = W * scale, ch = H * scale;
     const drift = (1 - ca) * W * 0.22;
@@ -5236,7 +5311,8 @@ async function exportVideo(){
       ctx.drawImage(mapCv, 0, 0, W, H);
       gradeFrame(ctx, cv, W, H);
       drawPaper(ctx, W, H);
-      if(f % 10 === 0) computeLabels();
+      if(f === 0){ labelAnim = new Map(); labelDt = 1 / fps; labelFirst = true; labelCtx = ctx; }
+      if(f % 6 === 0) computeLabels();
       drawLabels(ctx, W, H);
       drawAtmosphere(ctx, W, H, t);
       drawOverlay(ctx, W, H, st.year);
@@ -5272,6 +5348,7 @@ async function exportVideo(){
     setStatus('Export failed: ' + err.message);
     console.error(err);
   } finally {
+    labelAnim = null; labelFirst = false; labelCtx = null;
     btn.disabled = false; bar.style.display = 'none'; fill.style.width = '0%';
     exportBase = null;
     S.preview = prevPreview;
